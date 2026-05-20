@@ -73,10 +73,10 @@ package = true
 
 [tool.setuptools]
 packages = ["graphify"]
-include-package-data = false
+include-package-data = true
 
 [tool.setuptools.package-data]
-graphify = ["skill.md", "skill-codex.md", "skill-opencode.md", "skill-aider.md", "skill-copilot.md", "skill-claw.md", "skill-windows.md", "skill-droid.md", "skill-trae.md", "skill-kiro.md", "skill-vscode.md", "skill-pi.md"]
+graphify = ["skill.md", "skill-codex.md", "skill-opencode.md", "skill-aider.md", "skill-copilot.md", "skill-claw.md", "skill-windows.md", "skill-droid.md", "skill-trae.md", "skill-kiro.md", "skill-vscode.md", "skill-pi.md", "skill-omp.md", "omp-extension/index.ts", "omp-extension/package.json"]
 
 [tool.bandit]
 skips = ["B404"]

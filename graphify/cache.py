@@ -239,3 +239,21 @@ def save_semantic_cache(
             save_cached(p, result, root, kind="semantic")
             saved += 1
     return saved
+
+
+def uncached_semantic_files(files: list[str], root: Path = Path(".")) -> list[str]:
+    """Return paths from `files` that have no semantic cache entry.
+
+    Reads each file for SHA256 but does not read cache JSON — existence check only.
+    Does not create the cache directory if absent.
+    Used by report.generate() to surface pending extraction warnings in GRAPH_REPORT.md.
+    """
+    _out = os.environ.get("GRAPHIFY_OUT", "graphify-out")
+    _base = Path(_out) if Path(_out).is_absolute() else Path(root).resolve() / _out
+    sem_dir = _base / "cache" / "semantic"
+    if not sem_dir.is_dir():
+        return list(files)  # no cache dir → everything uncached
+    return [
+        f for f in files
+        if not (sem_dir / f"{file_hash(Path(f), root)}.json").exists()
+    ]

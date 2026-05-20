@@ -157,6 +157,86 @@ _PLATFORM_CONFIG: dict[str, dict] = {
     },
 }
 
+# ── OMP (oh-my-pi) ────────────────────────────────────────────────────────────
+_OMP_EXTENSION_SRC = Path(__file__).parent / "omp-extension" / "index.ts"
+_OMP_SKILL_SRC     = Path(__file__).parent / "skill-omp.md"
+
+
+def _omp_config_dir() -> Path:
+    """Resolve PI_CONFIG_DIR env var → ~/.omp by default (relative = under home dir)."""
+    env = os.environ.get("PI_CONFIG_DIR", ".omp")
+    p = Path(env)
+    return p if p.is_absolute() else Path.home() / p
+
+
+def _omp_install() -> None:
+    cfg_dir = _omp_config_dir()
+
+    ext_dst = cfg_dir / "agent" / "extensions" / "graphify" / "index.ts"
+    if not _OMP_EXTENSION_SRC.exists():
+        print("error: omp-extension/index.ts not found — run from repo clone", file=sys.stderr)
+        sys.exit(1)
+    ext_dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(_OMP_EXTENSION_SRC, ext_dst)
+    print(f"  extension  ->  {ext_dst}")
+
+    skill_dst = cfg_dir / "agent" / "skills" / "graphify" / "SKILL.md"
+    skill_dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(_OMP_SKILL_SRC, skill_dst)
+    print(f"  skill      ->  {skill_dst}")
+    # Register extension dir in config.yml — Settings reads config.yml (settings.json
+    # is only a one-time legacy migration source and is ignored when config.yml exists).
+    config_yml = cfg_dir / "agent" / "config.yml"
+    ext_dir_str = str(ext_dst.parent).replace("\\", "/")
+    _omp_register_config_yml(config_yml, ext_dir_str)
+
+    print()
+    print("Done. Restart OMP to activate.")
+
+
+def _omp_register_config_yml(config_yml: Path, ext_dir: str) -> None:
+    """Idempotent: add ext_dir to extensions: list in config.yml."""
+    if not config_yml.exists():
+        print(f"  warning: {config_yml} not found — add manually:\nextensions:\n  - {ext_dir}")
+        return
+    content = config_yml.read_text(encoding="utf-8")
+    if ext_dir in content:
+        print(f"  config.yml extensions ->  already registered")
+        return
+    # Append to end of file (safe: avoids YAML structure ambiguity)
+    content = content.rstrip() + f"\nextensions:\n  - {ext_dir}\n"
+    config_yml.write_text(content, encoding="utf-8")
+    print(f"  config.yml extensions ->  registered")
+
+
+def _omp_uninstall() -> None:
+    cfg_dir = _omp_config_dir()
+    agent_dir = cfg_dir / "agent"
+    ext_dir = agent_dir / "extensions" / "graphify"
+    for dst in (
+        ext_dir / "index.ts",
+        agent_dir / "skills" / "graphify" / "SKILL.md",
+    ):
+        if dst.exists():
+            dst.unlink()
+            print(f"  removed  ->  {dst}")
+        try:
+            dst.parent.rmdir()
+        except OSError:
+            pass
+    import re as _re
+    config_yml = agent_dir / "config.yml"
+    ext_dir_str = str(ext_dir).replace("\\", "/")
+    if config_yml.exists():
+        content = config_yml.read_text(encoding="utf-8")
+        if ext_dir_str in content:
+            content = _re.sub(
+                rf"\nextensions:\n(?:[ \t]+-[ \t]*[^\n]*\n)*",
+                lambda m: "" if ext_dir_str in m.group(0) else m.group(0),
+                content,
+            )
+            config_yml.write_text(content, encoding="utf-8")
+            print(f"  config.yml extensions ->  entry removed")
 
 def install(platform: str = "claude") -> None:
     if platform == "gemini":
@@ -1022,6 +1102,9 @@ def uninstall_all(project_dir: Path | None = None, purge: bool = False) -> None:
         else:
             print("\n  graphify-out/  ->  not found (nothing to purge)")
 
+    # OMP extension + skill
+    _omp_uninstall()
+
     print("\nDone. Run 'pip uninstall graphifyy' to remove the package itself.")
 
 
@@ -1221,6 +1304,8 @@ def main() -> None:
         print("  kiro uninstall          remove skill + steering file")
         print("  pi install              write skill to ~/.pi/agent/skills/graphify/ (Pi coding agent)")
         print("  pi uninstall            remove skill from ~/.pi/agent/skills/graphify/")
+        print("  omp install             deploy extension + skill to OMP config dir (PI_CONFIG_DIR)")
+        print("  omp uninstall           remove extension + skill from OMP config dir")
         print()
         return
 
@@ -1353,6 +1438,15 @@ def main() -> None:
                     break
         else:
             print("Usage: graphify pi [install|uninstall]", file=sys.stderr)
+            sys.exit(1)
+    elif cmd == "omp":
+        subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
+        if subcmd == "install":
+            _omp_install()
+        elif subcmd == "uninstall":
+            _omp_uninstall()
+        else:
+            print("Usage: graphify omp [install|uninstall]", file=sys.stderr)
             sys.exit(1)
     elif cmd in ("aider", "codex", "opencode", "claw", "droid", "trae", "trae-cn", "hermes"):
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -2427,6 +2521,21 @@ def main() -> None:
             image_files = [Path(p) for p in new_by_type.get("image", [])]
             deleted_files = list(detection.get("deleted_files", []))
             unchanged_total = sum(len(v) for v in detection.get("unchanged_files", {}).values())
+            # Also pick up unchanged semantic files missing from cache — fixes the
+            # case where update/hook stamped them into manifest before extract ran.
+            unchanged_by_type = detection.get("unchanged_files", {})
+            for _ftype, _flist, _dst in [
+                ("document", unchanged_by_type.get("document", []), doc_files),
+                ("paper",    unchanged_by_type.get("paper",    []), paper_files),
+                ("image",    unchanged_by_type.get("image",    []), image_files),
+            ]:
+                if _flist:
+                    from graphify.cache import check_semantic_cache as _csc
+                    _, _, _, _uncached = _csc(_flist, root=target)
+                    if _uncached:
+                        _dst += [Path(p) for p in _uncached]
+                        print(f"[graphify extract] {len(_uncached)} unchanged {_ftype} file(s) "
+                              f"missing from semantic cache — adding to extraction queue")
         else:
             code_files = [Path(p) for p in files_by_type.get("code", [])]
             doc_files = [Path(p) for p in files_by_type.get("document", [])]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from datetime import date
 import networkx as nx
+from pathlib import Path as _Path
 
 
 def _safe_community_name(label: str) -> str:
@@ -69,6 +70,24 @@ def generate(
         + (f" · INFERRED: {len(inf_edges)} edges (avg confidence: {inf_avg})" if inf_avg is not None else ""),
         f"- Token cost: {token_cost.get('input', 0):,} input · {token_cost.get('output', 0):,} output",
     ]
+
+    # Warn if doc/paper/image files are in the manifest but missing from semantic cache.
+    try:
+        from graphify.cache import uncached_semantic_files as _usf
+        _all_files = detection_result.get("files", {})
+        _doc_files = [
+            f for _ft in ("document", "paper", "image")
+            for f in _all_files.get(_ft, [])
+        ]
+        if _doc_files:
+            _uncached = _usf(_doc_files, root=_Path(root))
+            if _uncached:
+                lines.append(
+                    f"- ⚠ {len(_uncached)} doc/paper/image file(s) pending semantic extraction "
+                    f"— run `graphify extract .`"
+                )
+    except Exception:
+        pass  # never break report generation
 
     if built_at_commit:
         lines += [

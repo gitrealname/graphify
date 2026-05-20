@@ -1,0 +1,9 @@
+{
+  "name": "graphify-omp-extension",
+  "version": "0.1.0",
+  "description": "graphify OMP extension — knowledge graph slash command + tool_result hook",
+  "private": true,
+  "omp": {
+    "extensions": ["./index.ts"]
+  }
+}
