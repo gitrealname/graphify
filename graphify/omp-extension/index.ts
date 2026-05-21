@@ -1,5 +1,51 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
+
+// Respects GRAPHIFY_OUT env var — mirrors Python: os.environ.get("GRAPHIFY_OUT", "graphify-out")
+function graphifyOut(): string { return process.env.GRAPHIFY_OUT ?? "graphify-out"; }
+
+
+// ── Python interpreter detection ──────────────────────────────────────────────
+// Mirrors skill Step 1: read shebang from graphify binary, fall back to python3.
+// Result cached in <graphify-out>/.graphify_python (matches skill convention).
+let _pythonCache: string | null = null;
+
+function detectPython(): string {
+    if (_pythonCache) return _pythonCache;
+
+    // Check if a previous graphify run already wrote the interpreter path.
+    const cached = join(process.cwd(), graphifyOut(), ".graphify_python");
+    if (existsSync(cached)) {
+        const p = readFileSync(cached, "utf-8").trim();
+        if (p) { _pythonCache = p; return p; }
+    }
+
+    // Find graphify binary and read its shebang.
+    let python = "python3";
+    const graphifyBin = Bun.which("graphify");
+    if (graphifyBin) {
+        try {
+            const firstLine = readFileSync(graphifyBin, "utf-8").split("\n")[0];
+            if (firstLine.startsWith("#!")) {
+                const candidate = firstLine.slice(2).trim();
+                // Only accept clean paths (no special chars except / \ . - _)
+                if (/^[a-zA-Z0-9/_\\.:-]+$/.test(candidate)) {
+                    python = candidate;
+                }
+            }
+        } catch { /* fall through to default */ }
+    }
+
+    // Persist for subsequent steps (matches skill convention).
+    try {
+        require("node:fs").mkdirSync(join(process.cwd(), graphifyOut()), { recursive: true });
+        writeFileSync(cached, python, "utf-8");
+    } catch { /* non-fatal */ }
+
+    _pythonCache = python;
+    return python;
+}
 
 type AutocompleteItem = { label: string; value: string };
 
@@ -26,8 +72,35 @@ function shellSplit(input: string): string[] {
 
 const MAX_CONCURRENT = 5;
 
+// Enhanced extraction system prompt — matches the graphify skill's Step B2 rules.
+// deepMode=true adds aggressive INFERRED edges (--mode deep flag).
+function buildExtractionSystem(deepMode: boolean): string {
+    return `You are a graphify semantic extraction agent. Extract a knowledge graph fragment from the files provided.
+Output ONLY valid JSON — no explanation, no markdown fences, no preamble.
+
+Files are separated by === path === markers. Process each file section independently, then merge all results into the single JSON output.
+
+Rules:
+- EXTRACTED: relationship explicit in source (import, call, citation, reference)
+- INFERRED: reasonable inference (shared structure, implied dependency)
+- AMBIGUOUS: uncertain — flag it, do not omit
+- confidence_score REQUIRED on every edge: EXTRACTED=1.0, INFERRED=0.6-0.9 (reason individually), AMBIGUOUS=0.1-0.3
+
+Code files: extract semantic edges AST cannot find. Do NOT re-extract imports or calls already captured by AST.
+Doc/paper files: extract named concepts, entities, citations. Use file_type "rationale" for concept-like nodes (ideas, principles, decisions). Store WHY decisions were made as a rationale_for edge, not a separate node.
+Semantic similarity: if two concepts across files solve the same problem without a structural link, add a semantically_similar_to INFERRED edge (confidence 0.6-0.95). Non-obvious cross-file connections only.
+Hyperedges: if 3+ nodes share a concept or flow not captured by pairwise edges, add a hyperedge. Max 3 per file.${deepMode ? `
+
+DEEP MODE: be aggressive with INFERRED edges. Pursue every reasonable inference. Add semantically_similar_to edges for concepts that solve the same problem even if only loosely related. Prefer more edges over fewer.` : ""}
+
+Node ID format: lowercase, only [a-z0-9_]. Format: {stem}_{entity} where stem = filename stem, entity = symbol name (both normalised).
+
+Output exactly this schema:
+{"nodes":[{"id":"stem_entity","label":"Human Readable Name","file_type":"code|document|paper|image|rationale","source_file":"relative/path","source_location":null,"source_url":null,"captured_at":null,"author":null,"contributor":null}],"edges":[{"source":"node_id","target":"node_id","relation":"calls|implements|references|cites|conceptually_related_to|shares_data_with|semantically_similar_to|rationale_for","confidence":"EXTRACTED|INFERRED|AMBIGUOUS","confidence_score":1.0,"source_file":"relative/path","source_location":null,"weight":1.0}],"hyperedges":[{"id":"snake_case_id","label":"Human Readable Label","nodes":["node_id1","node_id2","node_id3"],"relation":"participate_in|implement|form","confidence":"EXTRACTED|INFERRED","confidence_score":0.75,"source_file":"relative/path"}],"input_tokens":0,"output_tokens":0}`;
+}
+
 // Returns null if completeSimple is not available (non-corp OMP).
-async function anthropicProxyServer(pi: any, ctx: any): Promise<{ port: number; stop: () => number } | null> {
+async function anthropicProxyServer(pi: any, ctx: any, deepMode: boolean): Promise<{ port: number; stop: () => number } | null> {
     // Access SDK via the injected pi-coding-agent module — no direct imports.
     const piModule = pi.pi;
     const { settings } = piModule;
@@ -92,9 +165,8 @@ async function anthropicProxyServer(pi: any, ctx: any): Promise<{ port: number; 
             try {
                 const body = await req.json() as any;
 
-                const system: string = Array.isArray(body.system)
-                    ? body.system.map((b: any) => (typeof b === "string" ? b : (b.text ?? ""))).join("\n")
-                    : typeof body.system === "string" ? body.system : "";
+                // Build system prompt — deepMode adds aggressive INFERRED instructions.
+                const system: string = buildExtractionSystem(deepMode);
 
                 const messages: any[] = body.messages ?? [];
                 const lastUser = [...messages].reverse().find((m: any) => m.role === "user");
@@ -146,13 +218,25 @@ async function anthropicProxyServer(pi: any, ctx: any): Promise<{ port: number; 
 
 // ── subprocess helper ─────────────────────────────────────────────────────────
 
-async function runGraphify(pi: any, argv: string[], ctx: any, hasBackend: boolean): Promise<{ output: string; chunkCount: number }> {
+async function runGraphify(pi: any, _argv: string[], ctx: any, hasBackend: boolean): Promise<{ output: string; chunkCount: number }> {
     const logger = pi.pi.logger;
     const env = { ...process.env } as Record<string, string>;
     delete env.GEMINI_API_KEY;
     delete env.GOOGLE_API_KEY;
 
+    // In corp OMP: update → extract. extract is already fully incremental (AST for
+    // changed code, semantic only for uncached docs) so there is no cost difference.
+    // This ensures update always produces a semantically complete, labeled graph.
+    const argv = _argv[0] === "update" ? ["extract", ..._argv.slice(1)] : _argv;
     const isExtractionCmd = argv[0] === "extract";
+    // --mode deep is a skill-level flag, not a graphify CLI flag — strip before spawn.
+    const deepMode = argv.includes("--mode") && argv[argv.indexOf("--mode") + 1] === "deep"
+        || argv.includes("--mode=deep");
+    const spawnBase = argv.filter((a, i) =>
+        !(a === "--mode" && argv[i + 1] === "deep") &&
+        !(a === "deep" && argv[i - 1] === "--mode") &&
+        a !== "--mode=deep"
+    );
     let proxy: { port: number; stop: () => number } | null = null;
 
     if (isExtractionCmd && !hasBackend) {
@@ -160,7 +244,7 @@ async function runGraphify(pi: any, argv: string[], ctx: any, hasBackend: boolea
             logger.debug("[DBG graphify] no model on ctx — running AST only");
         } else {
             try {
-                proxy = await anthropicProxyServer(pi, ctx);
+                proxy = await anthropicProxyServer(pi, ctx, deepMode);
                 if (proxy) {
                     env.ANTHROPIC_BASE_URL = `http://localhost:${proxy.port}`;
                     env.ANTHROPIC_API_KEY = "omp-internal";
@@ -175,12 +259,13 @@ async function runGraphify(pi: any, argv: string[], ctx: any, hasBackend: boolea
     }
 
     // Smaller token budget reduces chunk size → avoids adaptive-retry bisection.
-    const spawnArgv = (proxy && !argv.includes("--token-budget"))
-        ? [...argv, "--token-budget", "20000"]
-        : argv;
-    logger.debug(`[DBG graphify] spawn argv=${JSON.stringify(spawnArgv)} hasProxy=${!!proxy} hasBackend=${hasBackend}`);
+    const spawnArgv = (proxy && !spawnBase.includes("--token-budget"))
+        ? [...spawnBase, "--token-budget", "20000"]
+        : spawnBase;
+    const python = detectPython();
+    logger.debug(`[DBG graphify] python=${python} spawn argv=${JSON.stringify(spawnArgv)} hasProxy=${!!proxy} hasBackend=${hasBackend} deepMode=${deepMode}`);
 
-    const proc = Bun.spawn(["py.exe", "-m", "graphify", ...spawnArgv], {
+    const proc = Bun.spawn([python, "-m", "graphify", ...spawnArgv], {
         cwd: process.cwd(),
         env,
         stdout: "pipe",
@@ -205,12 +290,12 @@ async function runGraphify(pi: any, argv: string[], ctx: any, hasBackend: boolea
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function graphExists(): boolean {
-    return existsSync(join(process.cwd(), "graphify-out", "graph.json"));
+    return existsSync(join(process.cwd(), graphifyOut(), "graph.json"));
 }
 
 function readGraphReport(): string {
     try {
-        return readFileSync(join(process.cwd(), "graphify-out", "GRAPH_REPORT.md"), "utf-8");
+        return readFileSync(join(process.cwd(), graphifyOut(), "GRAPH_REPORT.md"), "utf-8");
     } catch {
         return "";
     }
@@ -229,6 +314,104 @@ function isSearchOrFind(event: any): boolean {
         return /grep|rg|ripgrep|find |fd /.test(cmd);
     }
     return false;
+}
+
+
+// ── community labeling (Step 5 from graphify skill) ──────────────────────────
+
+// Reads analysis + graph.json, returns "cid: label1, label2, ..." lines for LLM.
+const COMMUNITY_SAMPLES_PY = `
+import json, os, sys
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+from pathlib import Path
+out = Path(os.environ.get("GRAPHIFY_OUT", "graphify-out"))
+analysis_path = out / ".graphify_analysis.json"
+graph_path = out / "graph.json"
+if not analysis_path.exists() or not graph_path.exists():
+    sys.exit(0)
+analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+graph_data = json.loads(graph_path.read_text(encoding="utf-8"))
+node_labels = {n["id"]: n.get("label", n["id"]) for n in graph_data.get("nodes", [])}
+communities = {int(k): v for k, v in analysis["communities"].items()}
+lines = []
+for cid in sorted(communities):
+    nodes = communities[cid][:10]
+    sample = [node_labels.get(n, n) for n in nodes]
+    lines.append(f"{cid}: {', '.join(sample[:8])}")
+print("\\n".join(lines))
+`;
+
+async function labelCommunities(pi: any, ctx: any, targetPath: string): Promise<void> {
+    const piModule = pi.pi;
+    const logger = piModule.logger;
+    const completeSimple = piModule.completeSimple;
+    if (!completeSimple || !ctx.model) return;
+
+    // Write script to temp file — avoids Windows arg-length limits with -c
+    const tmpScript = require("node:os").tmpdir() + "/graphify_samples.py";
+    require("node:fs").writeFileSync(tmpScript, COMMUNITY_SAMPLES_PY, "utf-8");
+    const sampleProc = Bun.spawnSync([detectPython(), tmpScript], { cwd: process.cwd() });
+    const sampleStderr = new TextDecoder("utf-8").decode(sampleProc.stderr).trim();
+    const samples = new TextDecoder("utf-8").decode(sampleProc.stdout).trim();
+    logger.debug(`[DBG graphify] labelCommunities: sampleProc exit=${sampleProc.exitCode} stdoutLen=${samples.length} stderr=${sampleStderr.slice(0,200)}`);
+    if (!samples) { logger.debug("[DBG graphify] labelCommunities: no communities found"); return; }
+
+    // Load existing labels — only re-label community IDs not already present.
+    const labelsPath = join(process.cwd(), graphifyOut(), ".graphify_labels.json");
+    let existingLabels: Record<string, string> = {};
+    try {
+        existingLabels = JSON.parse(require("node:fs").readFileSync(labelsPath, "utf-8"));
+    } catch { /* no existing labels — label everything */ }
+
+    const allLines = samples.split("\n");
+    const toLabel = allLines.filter(l => !existingLabels[l.split(":")[0].trim()]);
+    logger.debug(`[DBG graphify] labelCommunities: ${allLines.length} total, ${toLabel.length} need labeling (${allLines.length - toLabel.length} already labeled)`);
+
+    if (toLabel.length === 0) {
+        logger.debug("[DBG graphify] labelCommunities: all communities already labeled — skipping LLM calls");
+        return;
+    }
+
+    // Batch communities — 80 per call to stay within output token budget.
+    const BATCH = 80;
+    const sampleLines = toLabel;
+    const allLabels: Record<string, string> = { ...existingLabels };
+
+    for (let i = 0; i < sampleLines.length; i += BATCH) {
+        const batch = sampleLines.slice(i, i + BATCH).join("\n");
+        const batchNum = Math.floor(i / BATCH) + 1;
+        const totalBatches = Math.ceil(sampleLines.length / BATCH);
+        logger.debug(`[DBG graphify] labelCommunities: batch ${batchNum}/${totalBatches} (${sampleLines.slice(i, i+BATCH).length} communities)`);
+
+        const result = await completeSimple(ctx.model, {
+            systemPrompt: ["Name each community in 2-5 descriptive words based on its members. Output ONLY valid JSON: {\"0\": \"Name\", \"1\": \"Name\", ...}. No explanation, no markdown fences."],
+            messages: [{ role: "user", content: [{ type: "text", text: `Communities to name:\n${batch}` }], timestamp: Date.now() }],
+        }, { maxTokens: 4096 });
+
+        const raw = (result.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text ?? "").join("").trim();
+        logger.debug(`[DBG graphify] labelCommunities batch ${batchNum} response preview=${JSON.stringify(raw.slice(0, 120))}`);
+
+        try {
+            const stripped = raw.startsWith("```") ? raw.split("```")[1].replace(/^json/, "").trim() : raw;
+            const parsed: Record<string, string> = JSON.parse(stripped);
+            Object.assign(allLabels, parsed);
+        } catch (err) {
+            logger.debug(`[DBG graphify] labelCommunities batch ${batchNum} parse failed: ${String(err)}`);
+        }
+    }
+
+    const labels = allLabels;
+    if (Object.keys(labels).length === 0) {
+        logger.debug("[DBG graphify] labelCommunities: all batches failed to parse, skipping");
+        return;
+    }
+
+    require("node:fs").writeFileSync(labelsPath, JSON.stringify(allLabels), "utf-8");
+    logger.debug(`[DBG graphify] labelCommunities: saved ${Object.keys(allLabels).length} labels (${toLabel.length} new)`);
+
+    // Re-run cluster-only so GRAPH_REPORT.md picks up the labels
+    Bun.spawnSync([detectPython(), "-m", "graphify", "cluster-only", targetPath], { cwd: process.cwd() });
+    logger.debug("[DBG graphify] labelCommunities: cluster-only re-run with labels");
 }
 
 // ── extension factory ─────────────────────────────────────────────────────────
@@ -286,26 +469,34 @@ export default function (pi: any): void {
             let chunkCount = 0;
             try {
                 ({ output: out, chunkCount } = await runGraphify(pi, argv, ctx, hasBackend));
+                // add: chain extract so the new file is immediately indexed.
+                if (argv[0] === "add" && !out.startsWith("error")) {
+                    logger.debug("[DBG graphify] add complete — chaining extract .");
+                    const extractResult = await runGraphify(pi, ["extract", "."], ctx, hasBackend);
+                    chunkCount += extractResult.chunkCount;
+                    out = extractResult.output || out;
+                }
             } catch (err) {
                 out = String(err);
             }
 
-            // extract writes graph.json but NOT GRAPH_REPORT.md — regenerate it.
-            if (argv[0] === "extract") {
-                const proc = Bun.spawnSync(["py.exe", "-m", "graphify", "cluster-only", argv[1] ?? "."], { cwd: process.cwd() });
+            // extract/add: run cluster-only, label, re-run cluster-only.
+            // cluster-only: label and re-run cluster-only.
+            if (argv[0] === "extract" || argv[0] === "add") {
+                const proc = Bun.spawnSync([detectPython(), "-m", "graphify", "cluster-only", argv[1] ?? "."], { cwd: process.cwd() });
                 logger.debug(`[DBG graphify] cluster-only exit=${proc.exitCode}`);
+                await labelCommunities(pi, ctx, argv[1] ?? ".");
+            } else if (argv[0] === "cluster-only") {
+                await labelCommunities(pi, ctx, argv[1] ?? ".");
             }
 
-            const isExtractionCmd = argv[0] === "extract" || argv[0] === "update";
+            const isExtractionCmd = argv[0] === "extract" || argv[0] === "update" || argv[0] === "add";
             if (isExtractionCmd) {
                 const report = readGraphReport();
                 if (report) {
                     const summary = summarizeReport(report);
                     if (summary) {
-                        const isExtract = argv[0] === "extract";
-                        const chunks = isExtract
-                            ? ` · ${chunkCount} chunk${chunkCount !== 1 ? "s" : ""} extracted`
-                            : chunkCount > 0 ? ` · ${chunkCount} chunk${chunkCount !== 1 ? "s" : ""} extracted` : "";
+                        const chunks = ` · ${chunkCount} chunk${chunkCount !== 1 ? "s" : ""} extracted`;
                         pi.sendMessage(
                             { customType: "graphify:hint", content: [{ type: "text", text: `[graphify] ${summary}${chunks}` }], display: true },
                             { deliverAs: "steer" },
