@@ -459,9 +459,15 @@ export default function (pi: any): void {
         handler: async (args: string, ctx: any): Promise<void> => {
             const logger = pi.pi.logger;
             // update → extract: extract is fully incremental, same cost, always complete.
+            // Commands that take a path default to "." if none given.
             const argv = (() => {
                 const raw = args.trim() ? shellSplit(args.trim()) : [];
-                return raw[0] === "update" ? ["extract", ...raw.slice(1)] : raw;
+                const cmd = raw[0] === "update" ? "extract" : raw[0];
+                const rest = raw[0] === "update" ? raw.slice(1) : raw.slice(1);
+                const needsPath = ["extract", "update", "cluster-only", "query", "path", "explain"].includes(cmd);
+                const hasPath = rest.length > 0 && !rest[0].startsWith("-");
+                const finalRest = needsPath && !hasPath ? [".", ...rest] : rest;
+                return cmd ? [cmd, ...finalRest] : raw;
             })();
             const hasBackend = argv.some((a: string) => a === "--backend" || a.startsWith("--backend="));
 
