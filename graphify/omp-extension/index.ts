@@ -218,16 +218,12 @@ async function anthropicProxyServer(pi: any, ctx: any, deepMode: boolean): Promi
 
 // ── subprocess helper ─────────────────────────────────────────────────────────
 
-async function runGraphify(pi: any, _argv: string[], ctx: any, hasBackend: boolean): Promise<{ output: string; chunkCount: number }> {
+async function runGraphify(pi: any, argv: string[], ctx: any, hasBackend: boolean): Promise<{ output: string; chunkCount: number }> {
     const logger = pi.pi.logger;
     const env = { ...process.env } as Record<string, string>;
     delete env.GEMINI_API_KEY;
     delete env.GOOGLE_API_KEY;
 
-    // In corp OMP: update → extract. extract is already fully incremental (AST for
-    // changed code, semantic only for uncached docs) so there is no cost difference.
-    // This ensures update always produces a semantically complete, labeled graph.
-    const argv = _argv[0] === "update" ? ["extract", ..._argv.slice(1)] : _argv;
     const isExtractionCmd = argv[0] === "extract";
     // --mode deep is a skill-level flag, not a graphify CLI flag — strip before spawn.
     const deepMode = argv.includes("--mode") && argv[argv.indexOf("--mode") + 1] === "deep"
@@ -460,7 +456,11 @@ export default function (pi: any): void {
         },
         handler: async (args: string, ctx: any): Promise<void> => {
             const logger = pi.pi.logger;
-            const argv = args.trim() ? shellSplit(args.trim()) : [];
+            // update → extract: extract is fully incremental, same cost, always complete.
+            const argv = (() => {
+                const raw = args.trim() ? shellSplit(args.trim()) : [];
+                return raw[0] === "update" ? ["extract", ...raw.slice(1)] : raw;
+            })();
             const hasBackend = argv.some((a: string) => a === "--backend" || a.startsWith("--backend="));
 
             logger.debug(`[DBG ext-cmd-graphify] argv=${JSON.stringify(argv)} hasBackend=${hasBackend} hasModel=${!!ctx.model}`);
