@@ -1,0 +1,45 @@
+# Tell GitHub Linguist to ignore generated/example HTML files when calculating
+# the repo's primary language. Without this, large graph.html artifacts in
+# worked/ dominate the byte count and the repo shows as HTML instead of Python.
+worked/**/*.html linguist-vendored=true
+graphify-out/**/*.html linguist-vendored=true
+*.html linguist-detectable=false
+
+# Default: normalize all text files to LF
+* text=auto eol=lf
+
+# Source files: explicit LF
+*.py   text eol=lf
+*.ts   text eol=lf
+*.js   text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.sh   text eol=lf
+*.cfg  text eol=lf
+*.ini  text eol=lf
+*.rst  text eol=lf
+
+# Binary — never normalize
+*.png    -text
+*.jpg    -text
+*.jpeg   -text
+*.gif    -text
+*.pdf    -text
+*.zip    -text
+*.gz     -text
+*.tar    -text
+*.db     -text
+*.sqlite -text
+*.pkl    -text
+*.npy    -text
+*.bin    -text
+*.exe    -text
+*.whl    -text
+
+# Windows scripts keep CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
