@@ -116,8 +116,9 @@ def test_missing_file_type_defaults_to_concept(capsys):
     assert G.nodes["n1"]["file_type"] == "concept"
 
 
-def test_real_invalid_file_type_still_warns(capsys):
-    """Truly invalid file_type values (not None, not empty) must still warn."""
+def test_real_invalid_file_type_coerced_to_concept():
+    """Unknown file_type values are coerced through the synonym mapper, falling
+    back to 'concept' for anything that isn't a known LLM synonym (#840)."""
     ext = {
         "nodes": [
             {"id": "n1", "label": "Bad", "file_type": "weird_type", "source_file": "a.py"},
@@ -126,10 +127,26 @@ def test_real_invalid_file_type_still_warns(capsys):
         "input_tokens": 0,
         "output_tokens": 0,
     }
-    build_from_json(ext)
-    err = capsys.readouterr().err
-    assert "invalid file_type" in err
-    assert "weird_type" in err
+    G = build_from_json(ext)
+    assert G.nodes["n1"]["file_type"] == "concept"
+
+
+def test_file_type_synonym_mapping():
+    """Known invalid file_type values map to their canonical equivalents."""
+    ext = {
+        "nodes": [
+            {"id": "n1", "label": "MD", "file_type": "markdown", "source_file": "a.md"},
+            {"id": "n2", "label": "Tool", "file_type": "tool", "source_file": "b.py"},
+            {"id": "n3", "label": "Pat", "file_type": "pattern", "source_file": "c.md"},
+        ],
+        "edges": [],
+        "input_tokens": 0,
+        "output_tokens": 0,
+    }
+    G = build_from_json(ext)
+    assert G.nodes["n1"]["file_type"] == "document"
+    assert G.nodes["n2"]["file_type"] == "code"
+    assert G.nodes["n3"]["file_type"] == "concept"
 
 
 def test_build_merge_preserves_call_edge_direction(tmp_path):
@@ -281,3 +298,49 @@ def test_edge_data_node_link_multigraph_roundtrip():
     assert d.get("relation") in ("calls", "references")
     ds = edge_datas(G, "a", "b")
     assert len(ds) == 2
+
+
+def test_build_from_json_relativizes_absolute_source_file(tmp_path):
+    """Semantic subagents emit absolute source_file paths; build_from_json must
+    relativize them to root so MCP traversal works correctly (#932)."""
+    root = tmp_path / "myproject"
+    root.mkdir()
+    abs_path = str(root / "docs" / "overview.md")
+    extraction = {
+        "nodes": [
+            {"id": "overview_intro", "label": "Intro", "source_file": abs_path, "file_type": "document"},
+        ],
+        "edges": [
+            {"source": "overview_intro", "target": "overview_intro",
+             "relation": "self", "confidence": "EXTRACTED", "confidence_score": 1.0,
+             "source_file": abs_path},
+        ],
+    }
+    G = build_from_json(extraction, root=root)
+    sf = G.nodes["overview_intro"]["source_file"]
+    assert not sf.startswith("/"), f"source_file still absolute: {sf}"
+    assert sf == "docs/overview.md"
+
+
+def test_build_relativizes_absolute_source_file(tmp_path):
+    """build() passes root through to build_from_json (#932)."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    abs_path = str(root / "src" / "main.py")
+    extraction = {
+        "nodes": [{"id": "main_fn", "label": "main", "source_file": abs_path, "file_type": "code"}],
+        "edges": [],
+    }
+    G = build([extraction], root=root)
+    sf = G.nodes["main_fn"]["source_file"]
+    assert sf == "src/main.py"
+
+
+def test_build_from_json_relative_source_file_unchanged(tmp_path):
+    """Already-relative source_file paths must not be modified."""
+    extraction = {
+        "nodes": [{"id": "foo_bar", "label": "bar", "source_file": "src/foo.py", "file_type": "code"}],
+        "edges": [],
+    }
+    G = build_from_json(extraction, root=tmp_path)
+    assert G.nodes["foo_bar"]["source_file"] == "src/foo.py"

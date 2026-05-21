@@ -104,11 +104,43 @@ def test_codex_skill_contains_spawn_agent():
     assert "spawn_agent" in skill
 
 
+def test_codex_skill_uses_graphify_with_dirty_graph_output():
+    """Codex skill must keep graph-first orientation even when graph output is dirty."""
+    import graphify
+    skill = (Path(graphify.__file__).parent / "skill-codex.md").read_text()
+    assert "Dirty `graphify-out/` artifacts are expected" in skill
+    assert "not a reason to skip Graphify" in skill
+    assert "graphify query" in skill
+    assert "graphify explain" in skill
+    assert "graphify path" in skill
+
+
+def test_codex_agents_install_mentions_dirty_graph_output(tmp_path):
+    _agents_install(tmp_path, "codex")
+    content = (tmp_path / "AGENTS.md").read_text()
+    assert "Dirty graphify-out/ files are expected" in content
+    assert "not a reason to skip graphify" in content
+
+
 def test_opencode_skill_contains_mention():
     """OpenCode skill file must reference @mention."""
     import graphify
     skill = (Path(graphify.__file__).parent / "skill-opencode.md").read_text()
     assert "@mention" in skill
+
+
+def test_opencode_skill_uses_opencode_agent_guidance():
+    """OpenCode skill must not reference Codex/Claude agent type names."""
+    import graphify
+    skill = (Path(graphify.__file__).parent / "skill-opencode.md").read_text()
+    assert "general-purpose" not in skill
+    assert 'subagent_type="general-purpose"' not in skill
+    assert "@agent" in skill
+    assert "serial fallback" in skill
+    assert "reduce semantic chunks to 10-12 files each" in skill
+    assert "10-12 files each if the smaller-chunk large-corpus policy was applied" in skill
+    assert "process chunks one at a time" in skill
+    assert "Wait for the user's answer before proceeding" not in skill
 
 
 def test_claw_skill_is_sequential():

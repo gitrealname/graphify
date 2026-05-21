@@ -46,6 +46,45 @@ def _make_minhash(text: str, num_perm: int = 128) -> MinHash:
     return m
 
 
+# Matches labels whose trailing token is a version/variant suffix:
+# digits optionally followed by letters (chip SKUs: ASR1603, M1, Cortex-A55)
+# or 2+ letters (codename revisions: cranelr vs cranel).
+# Requires the stem to end in a letter so plain words don't accidentally match.
+_VARIANT_SUFFIX = re.compile(r"^(.*[a-z])([0-9]+[a-z]*|[a-z]{2,})$")
+
+
+def _is_variant_pair(a: str, b: str) -> bool:
+    """True if a and b are sibling model/SKU variants (same stem, different suffix).
+
+    Only applied to short labels (< 12 chars); long labels go through JW normally.
+    """
+    if a == b:
+        return False
+    if max(len(a), len(b)) >= 12:
+        return False
+    ma, mb = _VARIANT_SUFFIX.match(a), _VARIANT_SUFFIX.match(b)
+    if not (ma and mb):
+        return False
+    return ma.group(1) == mb.group(1) and ma.group(2) != mb.group(2)
+
+
+def _short_label_blocked(a: str, b: str, jw_score: float) -> bool:
+    """Block fuzzy merge for short labels unless it's a same-length single-char substitution.
+
+    Insertions/deletions on short strings (cranel/cranelr, M1/M1 Pro) produce
+    high Jaro-Winkler scores due to the prefix bonus but are almost never true
+    duplicates — they're abbreviations or variants.
+    """
+    if max(len(a), len(b)) >= 12:
+        return False
+    from rapidfuzz.distance import DamerauLevenshtein
+    # Allow only same-length single-char substitutions (true typos like "Extractor"/"Extractar").
+    # Block length-differing pairs regardless of score.
+    if jw_score >= 97.0 and len(a) == len(b) and DamerauLevenshtein.distance(a, b) <= 1:
+        return False
+    return True
+
+
 # ── union-find ────────────────────────────────────────────────────────────────
 
 class _UF:
@@ -135,13 +174,22 @@ def deduplicate_entities(
             norm_to_nodes[key].append(node)
 
     uf = _UF()
+    exact_merges = 0
     for key, group in norm_to_nodes.items():
-        if len(group) > 1:
-            winner = _pick_winner(group)
-            for node in group:
-                uf.union(winner["id"], node["id"])
-
-    exact_merges = sum(len(g) - 1 for g in norm_to_nodes.values() if len(g) > 1)
+        if len(group) <= 1:
+            continue
+        # Partition by source_file — only merge within the same file in Pass 1.
+        # Cross-file matches fall through to Pass 2 fuzzy matching.
+        by_file: dict[str, list[dict]] = defaultdict(list)
+        for node in group:
+            sf = node.get("source_file") or ""
+            by_file[sf].append(node)
+        for file_group in by_file.values():
+            if len(file_group) > 1:
+                winner = _pick_winner(file_group)
+                for node in file_group:
+                    uf.union(winner["id"], node["id"])
+                exact_merges += len(file_group) - 1
 
     # ── pass 2: MinHash/LSH + Jaro-Winkler (high-entropy nodes only) ─────────
     candidates: list[dict] = []
@@ -185,9 +233,15 @@ def deduplicate_entities(
                 neighbor_norm = _norm(neighbor.get("label", neighbor.get("id", "")))
                 score = JaroWinkler.normalized_similarity(norm_label, neighbor_norm) * 100
 
+                if _is_variant_pair(norm_label, neighbor_norm):
+                    continue
+                if _short_label_blocked(norm_label, neighbor_norm, score):
+                    continue
+
                 c1 = communities.get(node_id)
                 c2 = communities.get(neighbor_id)
-                if c1 is not None and c2 is not None and c1 == c2:
+                if (c1 is not None and c2 is not None and c1 == c2
+                        and min(len(norm_label), len(neighbor_norm)) >= 12):
                     score += _COMMUNITY_BOOST
 
                 if score >= _MERGE_THRESHOLD:
@@ -233,8 +287,20 @@ def deduplicate_entities(
     deduped_edges = []
     for edge in edges:
         e = dict(edge)
-        e["source"] = remap.get(e["source"], e["source"])
-        e["target"] = remap.get(e["target"], e["target"])
+        # Tolerate "from"/"to" keys from LLM backends that don't follow the
+        # schema exactly — build_from_json normalises later but dedup runs
+        # first so bracket access would KeyError here (#803).
+        # Use explicit key presence check (not `or`) so empty-string src/tgt
+        # aren't silently replaced by the fallback key.
+        src = e["source"] if "source" in e else e.get("from")
+        tgt = e["target"] if "target" in e else e.get("to")
+        if src is None or tgt is None:
+            continue
+        e["source"] = remap.get(src, src)
+        e["target"] = remap.get(tgt, tgt)
+        # Remove legacy keys so they don't leak into edge attrs in graph.json.
+        e.pop("from", None)
+        e.pop("to", None)
         if e["source"] != e["target"]:
             deduped_edges.append(e)
 
@@ -285,9 +351,14 @@ def _llm_tiebreak(
                 continue
             norm_j = _norm(neighbor.get("label", neighbor.get("id", "")))
             score = JaroWinkler.normalized_similarity(norm_i, norm_j) * 100
+            if _is_variant_pair(norm_i, norm_j):
+                continue
+            if _short_label_blocked(norm_i, norm_j, score):
+                continue
             c1 = communities.get(node["id"])
             c2 = communities.get(neighbor["id"])
-            if c1 is not None and c2 is not None and c1 == c2:
+            if (c1 is not None and c2 is not None and c1 == c2
+                    and min(len(norm_i), len(norm_j)) >= 12):
                 score += _COMMUNITY_BOOST
             if low <= score < high:
                 ambiguous.append((node, neighbor, score))

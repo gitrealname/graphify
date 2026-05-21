@@ -22,27 +22,65 @@
 #
 from __future__ import annotations
 import json
+import os
 import re
 import sys
+import unicodedata
 from pathlib import Path
 import networkx as nx
 from .validate import validate_extraction
 
 
+# Synonym mapper for known invalid file_type values that LLM subagents commonly
+# emit. Keeps semantic intent close (markdown→document, tool→code) and falls
+# back to "concept" for any other invalid value (see #840).
+_FILE_TYPE_SYNONYMS = {
+    "markdown": "document",
+    "text": "document",
+    "tool": "code",
+    "library": "code",
+    "pattern": "concept",
+    "principle": "concept",
+    "constraint": "concept",
+    "tech": "concept",
+    "technology": "concept",
+    "data-source": "concept",
+    "data_source": "concept",
+    "gotcha": "concept",
+    "framework": "concept",
+}
+
+
 def _normalize_id(s: str) -> str:
-    """Normalize an ID string the same way extract._make_id does.
+    r"""Normalize an ID string the same way extract._make_id does.
 
     Used to reconcile edge endpoints when the LLM generates IDs with slightly
-    different punctuation or casing than the AST extractor.
+    different punctuation or casing than the AST extractor. Must stay in sync
+    with extract._make_id — NFKC normalization, \w with re.UNICODE, underscore
+    collapse, and casefold must all match (#811).
     """
-    cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", s)
-    return cleaned.strip("_").lower()
+    s = unicodedata.normalize("NFKC", s)
+    cleaned = re.sub(r"[^\w]+", "_", s, flags=re.UNICODE)
+    cleaned = re.sub(r"_+", "_", cleaned)
+    return cleaned.strip("_").casefold()
 
 
-def _norm_source_file(p: str | None) -> str | None:
-    """Normalize path separators to forward slashes so Windows backslash paths
-    and POSIX paths from semantic subagents resolve to the same node identity."""
-    return p.replace("\\", "/") if p else p
+def _norm_source_file(p: str | None, root: str | None = None) -> str | None:
+    """Normalize path separators and relativize absolute paths.
+
+    Converts backslashes to forward slashes (Windows compatibility) and, when
+    root is provided, strips the absolute prefix from paths produced by semantic
+    subagents so source_file is always repo-relative (fixes #932).
+    """
+    if not p:
+        return p
+    p = p.replace("\\", "/")
+    if root and os.path.isabs(p):
+        try:
+            p = Path(p).relative_to(root).as_posix()
+        except ValueError:
+            pass
+    return p
 
 
 def edge_data(G: nx.Graph, u: str, v: str) -> dict:
@@ -66,12 +104,15 @@ def edge_datas(G: nx.Graph, u: str, v: str) -> list[dict]:
     return [raw]
 
 
-def build_from_json(extraction: dict, *, directed: bool = False) -> nx.Graph:
+def build_from_json(extraction: dict, *, directed: bool = False, root: str | Path | None = None) -> nx.Graph:
     """Build a NetworkX graph from an extraction dict.
 
     directed=True produces a DiGraph that preserves edge direction (source→target).
     directed=False (default) produces an undirected Graph for backward compatibility.
+    root: if given, absolute source_file paths from semantic subagents are made
+        relative to root so all nodes share a consistent path key (#932).
     """
+    _root = str(Path(root).resolve()) if root else None
     # NetworkX <= 3.1 serialised edges as "links"; remap to "edges" for compatibility.
     if "edges" not in extraction and "links" in extraction:
         extraction = dict(extraction, edges=extraction["links"])
@@ -100,6 +141,9 @@ def build_from_json(extraction: dict, *, directed: bool = False) -> nx.Graph:
         # trigger spurious "invalid file_type 'None'" validator warnings (#660).
         if node.get("file_type") in (None, ""):
             node["file_type"] = "concept"
+        ft = node.get("file_type", "")
+        if ft and ft not in {"code", "document", "paper", "image", "rationale", "concept"}:
+            node["file_type"] = _FILE_TYPE_SYNONYMS.get(ft, "concept")
 
     errors = validate_extraction(extraction)
     # Dangling edges (stdlib/external imports) are expected - only warn about real schema errors.
@@ -109,7 +153,7 @@ def build_from_json(extraction: dict, *, directed: bool = False) -> nx.Graph:
     G: nx.Graph = nx.DiGraph() if directed else nx.Graph()
     for node in extraction.get("nodes", []):
         if "source_file" in node:
-            node["source_file"] = _norm_source_file(node["source_file"])
+            node["source_file"] = _norm_source_file(node["source_file"], _root)
         G.add_node(node["id"], **{k: v for k, v in node.items() if k != "id"})
     node_set = set(G.nodes())
     # Normalized ID map: lets edges survive when the LLM generates IDs with
@@ -133,7 +177,7 @@ def build_from_json(extraction: dict, *, directed: bool = False) -> nx.Graph:
             continue  # skip edges to external/stdlib nodes - expected, not an error
         attrs = {k: v for k, v in edge.items() if k not in ("source", "target")}
         if "source_file" in attrs:
-            attrs["source_file"] = _norm_source_file(attrs["source_file"])
+            attrs["source_file"] = _norm_source_file(attrs["source_file"], _root)
         # Preserve original edge direction - undirected graphs lose it otherwise,
         # causing display functions to show edges backwards.
         attrs["_src"] = src
@@ -151,6 +195,7 @@ def build(
     directed: bool = False,
     dedup: bool = True,
     dedup_llm_backend: str | None = None,
+    root: str | Path | None = None,
 ) -> nx.Graph:
     """Merge multiple extraction results into one graph.
 
@@ -159,6 +204,7 @@ def build(
     dedup=True (default) runs entity deduplication before building the graph.
     dedup_llm_backend: if set (e.g. "gemini", "claude", or "kimi"), uses LLM to resolve
         ambiguous pairs in the 75–92 Jaro-Winkler score zone.
+    root: if given, absolute source_file paths are made relative to root (#932).
 
     Extractions are merged in order. For nodes with the same ID, the last
     extraction's attributes win (NetworkX add_node overwrites). Pass AST
@@ -178,7 +224,7 @@ def build(
             combined["nodes"], combined["edges"], communities={},
             dedup_llm_backend=dedup_llm_backend,
         )
-    return build_from_json(combined, directed=directed)
+    return build_from_json(combined, directed=directed, root=root)
 
 
 def _norm_label(label: str) -> str:
@@ -240,11 +286,13 @@ def build_merge(
     directed: bool = False,
     dedup: bool = True,
     dedup_llm_backend: str | None = None,
+    root: str | Path | None = None,
 ) -> nx.Graph:
     """Load existing graph.json, merge new chunks into it, and save back.
 
     Never replaces - only grows (or prunes deleted-file nodes via prune_sources).
     Safe to call repeatedly: existing nodes and edges are preserved.
+    root: if given, absolute source_file paths in new_chunks are made relative (#932).
     """
     graph_path = Path(graph_path)
     if graph_path.exists():
@@ -265,13 +313,14 @@ def build_merge(
         base = []
 
     all_chunks = base + list(new_chunks)
-    G = build(all_chunks, directed=directed, dedup=dedup, dedup_llm_backend=dedup_llm_backend)
+    G = build(all_chunks, directed=directed, dedup=dedup, dedup_llm_backend=dedup_llm_backend, root=root)
 
-    # Prune nodes from deleted source files
+    # Prune nodes and edges from deleted source files
     if prune_sources:
+        prune_set = set(prune_sources)
         to_remove = [
             n for n, d in G.nodes(data=True)
-            if d.get("source_file") in prune_sources
+            if d.get("source_file") in prune_set
         ]
         G.remove_nodes_from(to_remove)
         n_files = len(prune_sources)
@@ -281,10 +330,22 @@ def build_merge(
                 f"[graphify] Pruned {n_nodes} node(s) from {n_files} deleted source file(s).",
                 file=sys.stderr,
             )
-        else:
+
+        edges_to_remove = [
+            (u, v) for u, v, d in G.edges(data=True)
+            if d.get("source_file") in prune_set
+        ]
+        if edges_to_remove:
+            G.remove_edges_from(edges_to_remove)
+            print(
+                f"[graphify] Pruned {len(edges_to_remove)} edge(s) from deleted source file(s).",
+                file=sys.stderr,
+            )
+
+        if not n_nodes and not edges_to_remove:
             print(
                 f"[graphify] {n_files} source file(s) deleted since last run — "
-                f"no matching nodes in graph, already clean.",
+                f"no matching nodes or edges in graph, already clean.",
                 file=sys.stderr,
             )
 

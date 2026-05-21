@@ -2,6 +2,170 @@
 
 Full release notes with details on each version: [GitHub Releases](https://github.com/safishamsi/graphify/releases)
 
+## 0.8.14 (2026-05-20)
+
+- Fix: `--wiki` crash when community node IDs are stale after dedup or re-extract — stale IDs are now silently dropped with a stderr warning; raises a clear error only if every ID is stale (#936)
+- Fix: `.gitignore` patterns now respected when no `.graphifyignore` exists — previous behaviour silently ignored the project's gitignore, causing expected exclusions to be skipped (#945)
+- Feat: `--exclude <pattern>` CLI flag to pass extra gitignore-style exclusion patterns at runtime without modifying `.graphifyignore` (#947)
+- Fix: `.worktrees/` directory now skipped during scan — git worktree sibling checkouts inside `.worktrees/` were previously indexed as duplicate source (#947)
+- Security: NAT64 IPv6 addresses (`64:ff9b::/96`) no longer false-positive as blocked reserved IPs — affects hosts like `arxiv.org` on IPv6-only networks where the ISP uses RFC 6052 NAT64
+
+## 0.8.13 (2026-05-18)
+
+- Fix: node ID collisions across same-named files in different directories — SQL extractor and Python import resolver now use directory-qualified stems (`dir_file_entity`) instead of bare filename stems, preventing silent node merging on repos with duplicate filenames (#1A, #1B)
+- Perf: stat-based mtime fastpath for `file_hash` — skips full SHA256 read when file size+mtime_ns unchanged, same trade-off as make; index flushed atomically via atexit
+- Fix: absolute `source_file` paths from semantic subagents no longer stored in graph — `build_from_json`, `build`, and `build_merge` accept a `root` param and relativize paths at build time (#932)
+- Fix: failed semantic chunks no longer permanently freeze their files in the manifest — only files that appear in extraction output get `semantic_hash` stamped; failed-chunk files keep empty `semantic_hash` and are re-queued on next run (#933)
+- Feat: `graphify cache-check`, `graphify merge-chunks`, `graphify merge-semantic` CLI subcommands expose cache and merge logic as library-callable commands for skill pipelines
+
+## 0.8.12 (2026-05-18)
+
+- Security: `_is_sensitive` now correctly flags underscore-prefixed secret filenames (`api_token.txt`, `oauth_token.json`) — `\b` word boundary was treating `_` as a word char, so names like `api_token` never matched (#920)
+- Security: `_is_sensitive` now checks parent directories against a `_SENSITIVE_DIRS` blocklist (`.ssh`, `.aws`, `.gcloud`, `secrets`, etc.) so any file inside those dirs is skipped regardless of name; root-level files named `credentials` or `secrets` are no longer falsely flagged (#920)
+- Fix: `--wiki` Relationships section was always empty — `_cross_community_links` read `community` from node attributes (always None) instead of the `communities` dict; `_god_node_article` had the same bug and never linked to the owning community (#925)
+- Fix: `--watch` now respects `.graphifyignore` — the event handler was checking extensions before the ignore filter, so paths inside `node_modules/`, `.venv/`, etc. triggered rebuilds (#928)
+- Fix: `graphify <path>` now correctly dispatches to `graphify extract <path>` — previously a bare path argument returned "unknown command" instead of starting extraction
+- Fix: skill fast path — if `graphify-out/graph.json` already exists and the request is a natural-language question, extraction steps are skipped entirely and `graphify query` runs immediately; previously the skill re-ran detect and hit the corpus-size gate on every question
+- Fix: large-corpus gate raised from 200 to 500 files; `detect()` now returns `scan_root` so the skill correctly computes relative subdirectory breakdowns instead of showing absolute paths; flat repos with no subdirectories no longer ask the user to pick a subfolder that doesn't exist
+- Docs: clarify that code-only corpora skip the LLM semantic extraction pass entirely — AST handles code, Pass 3 is reserved for docs, papers, images, and transcripts (#836)
+
+## 0.8.11 (2026-05-18)
+
+- Fix: LLM empty choices / None message guard — Gemini and other providers return `choices=[]` on content-filtered HTTP 200 responses; now raises a clean error instead of crashing with IndexError (#924)
+- Fix: OpenCode skill removed invalid `general-purpose` agent reference and headless-incompatible interactive halt (#911, closes #825)
+- Fix: Codex skill now uses graphify query/explain/path even when graph artifacts are dirty in worktree (#913, closes #860)
+- Perf: precompute degrees once in surprise scoring — ~11x speedup per lookup on large graphs (#914)
+
+## 0.8.10 (2026-05-17)
+
+- Fix: git hooks phantom directory on git < 2.31 — drop `--path-format=absolute`, validate path contains no newlines, anchor relative paths on repo root (#907)
+- Fix: `save_manifest` incremental data loss — seed from existing manifest before loop so untouched files aren't erased on partial runs (#917)
+- Fix: C++ class/struct inheritance edges missing — extract `base_class_clause` for `class_specifier` and `struct_specifier` (#915)
+- Fix: cohesion split threshold unreachable due to rounding — `cohesion_score` now returns raw float, display rounds to 2dp (#919)
+- Fix: Rust cross-crate spurious INFERRED edges — skip `Type::method()` scoped calls and common trait-method names from cross-file resolver (#908)
+- Feat: `--resolution N` for `extract` and `cluster-only` — control Leiden/Louvain community granularity (>1 = more smaller, <1 = fewer larger) (#919)
+- Feat: `--exclude-hubs P` for `extract` and `cluster-only` — exclude degree-percentile super-hubs from partitioning, reattach by majority-vote neighbour community (#919)
+
+## 0.8.9 (2026-05-17)
+
+- Feat: DeepSeek backend support — set `DEEPSEEK_API_KEY` and use `--backend deepseek`; default model `deepseek-v4-flash`
+
+## 0.8.8 (2026-05-16)
+
+- Feat: `graphify prs` — graph-aware PR dashboard: CI state, review decision, worktree mapping, and graph blast radius per PR; `--triage` ranks your queue via any configured LLM backend (claude, kimi, openai, gemini, claude-cli, ollama — auto-detected); `--conflicts` shows PRs sharing graph communities with node labels; `--worktrees` maps worktree paths to branches to open PRs; MCP tools `list_prs`, `get_pr_impact`, `triage_prs` for agent access
+
+## 0.8.7 (2026-05-16)
+
+- Fix: query seed selection now uses IDF weighting — common terms like `error` or `handle` that match dozens of nodes are down-weighted so a rare identifier like `FooBarService` ranks first and BFS expands from the right node (#897)
+- Fix: seed count is now dynamic — a dominant match (score gap >80% vs next candidate) gets one seed rather than always picking three, preventing noise nodes from consuming BFS slots alongside the target (#897)
+- Fix: truncation message in `query_graph` now tells Claude what to do (call `get_node` or add a `context_filter`) rather than just saying "truncated" (#897)
+- Fix: C++ class data members (`int x;`, `static const int MAX = 100;`) now extracted as nodes with `defines` edges from the parent class — previously the field_declaration branch was a no-op due to a wrong child type guard (#898)
+- Fix: dedup Pass 1 now partitions same-label groups by source_file before merging — nodes with generic labels (`handle`, `init`, `run`) from different files no longer collapse into artificial god nodes; cross-file matches are routed to Pass 2 fuzzy (#895)
+- Fix: C/C++ `#include "path/to/file.h"` edges now resolve the include path relative to the including file and use the full resolved path as the target node ID, matching what extraction creates for the included file — previously all include edges dangled with a basename-only ID (#899)
+- Fix: `exact_merges` counter in dedup now reports only merges actually performed rather than counting all same-label nodes across files (#895)
+
+## 0.8.6 (2026-05-16)
+
+- Fix: cross-language INFERRED `calls`/`uses` edges (e.g. Python → TypeScript) are suppressed in Surprising Connections — label-matching across language boundaries in monorepos is resolver pollution, not structural insight; all structural bonuses zeroed for these edges
+- Fix: code-to-doc INFERRED `calls`/`uses` edges suppressed in Surprising Connections — the LLM seeing a symbol name in a README and emitting a `calls` edge is documentation cross-reference noise, not a real architectural connection (#890)
+- Fix: generic JSON key nodes (`name`, `id`, `type`, `start`, `end`, `key`, `value`, `data`, `items`, `title`, `description`, `version`, `properties`) filtered from god_nodes — their degree is positional (every sibling record in the same JSON file references them), not architectural (#890)
+- Fix: Alembic migrations, Django migrations, and protobuf-generated files now have their module-level docstrings suppressed from rationale extraction — these are boilerplate headers, not design intent; function docstrings inside migration files are still captured
+- Feat: `--follow-symlinks` is now auto-detected — if symlinked children are present in the target directory, follow-symlinks is enabled automatically without requiring an explicit flag (#887)
+- Fix: install guidance now directs users to run `/graphify query` interactively rather than reading `GRAPH_REPORT.md` first; the report is a summary, not a starting point (#891)
+
+## 0.8.5 (2026-05-15)
+
+- Fix: `.graphifyignore` parent-exclusion rule now correctly blocks files under an excluded directory even when a `!` negation exists elsewhere in the file — previously any negation pattern disabled directory pruning entirely (#882)
+- Fix: dedup no longer false-merges chip/model SKU variants like `ASR1603`/`ASR1605` or `M1`/`M1 Pro` — Jaro-Winkler prefix bonus is now gated by `_is_variant_pair` and `_short_label_blocked` guards; real typos on short labels still merge (#878)
+- Docs: added `worked/rsl-siege-manager/` — case study on a real-world Python + TypeScript monorepo (FastAPI backend, React/Vite frontend, Discord bot); covers god node behaviour with tests included, cross-language INFERRED edges, community cohesion, and Alembic migration noise (#881)
+
+## 0.8.4 (2026-05-15)
+
+- Feat: Firebird SQL — trigger and stored procedure extraction via `CREATE TRIGGER` and regex fallback; FK detection via global regex covering `REFERENCES` and `FOREIGN KEY` clauses (#875)
+- Fix: SQL extraction regex fallback now decodes source as UTF-8 instead of latin-1, preventing non-ASCII identifier hash mismatches (#875)
+- Fix: `--update` deletion pruning now matches on full source file paths instead of basenames, preventing false node removal when different directories contain files with the same name (#876)
+- Fix: `--update` now also prunes edges whose `source_file` attr points to deleted files, not just nodes (#876)
+- Fix: community label keys from `graph.json` (stored as strings) are now coerced to int before lookup, fixing blank community names in GRAPH_REPORT.md and graph.html (#877)
+
+## 0.8.3 (2026-05-15)
+
+- Fix: Windows skill temp files (chunk JSONs, `.graphify_python`, `.graphify_root`) no longer pollute the project root — all written under `graphify-out/` (#831)
+- Fix: `--update` with deletions-only no longer errors when `.graphify_extract.json` does not yet exist — creates an empty extraction file before merging (#876)
+
+## 0.8.2 (2026-05-15)
+
+- Fix: Python interpreter detection for `uv tool` and `pipx` installs on Windows — `graphify install` and all skill steps now find the correct executable (#831)
+- Fix: antigravity Windows skill path resolution (#831)
+- Fix: dot directories (e.g. `.github/`, `.vscode/`) are now indexed when explicitly included via `.graphifyignore` (#873)
+- Fix: MCP server hot-reloads the graph when `graph.json` changes on disk (#874)
+
+## 0.8.1 (2026-05-15)
+
+- Feat: Bash extractor — `.sh` and `.bash` files now indexed via tree-sitter; extracts functions, cross-function calls, `source`/`.` imports resolved to real file paths, and `export`/`declare` variable declarations (#866)
+- Feat: JSON extractor — `.json` files now indexed via tree-sitter; extracts key/value `contains` tree, `dependencies`/`devDependencies` blocks as `imports` edges, `extends` edges (tsconfig, eslintrc), and `$ref` references (#866)
+- Feat: `.sh`, `.bash`, `.json` added to `CODE_EXTENSIONS` in `detect.py` so files are picked up during corpus scan (#866)
+- Feat: Mermaid callflow HTML auto-regenerates on every graph rebuild when `*-callflow.html` exists in `graphify-out/` — works with `--watch` and `graphify hook install`
+- Fix: `coverage/`, `lcov-report/`, `visual-tests/`, `visual-test/`, `__snapshots__/`, `snapshots/`, `storybook-static/`, `dist-protected/` added to `_SKIP_DIRS` — generated artefact dirs no longer appear in the corpus (#869, #870)
+- Fix: `graphify hook install` now works in git linked worktrees — uses `git rev-parse --git-path hooks` instead of constructing `.git/hooks/` directly (#865)
+- Fix: office sidecar files in `graphify-out/converted/` are now checked against `.graphifyignore` before being added to the file list (#861)
+- Fix: `save_manifest()` accepts a `kind` parameter (`ast`, `semantic`, `both`) — incremental AST-only `graphify update` no longer overwrites `semantic_hash` entries, preventing spurious full re-extracts on the next run (#857)
+- Fix: five paths in `skill-windows.md` Step B3 were missing the `graphify-out/` prefix, causing chunk files to be written to the wrong directory (#862)
+
+## 0.7.19 (2026-05-14)
+
+- Feat: `.astro` files now extracted as code — frontmatter static imports, dynamic imports, and `<script>` block imports all produce edges; tsconfig path aliases resolved (#850, PR #852)
+- Fix: `.rebuild.lock` no longer accumulates PIDs across rebuilds — now contains a single owning PID while running and is unlinked on release so downstream tooling polling for its absence unblocks promptly (#858, PR #859)
+- Docs: skill.md now clarifies that graphify does not read `ANTHROPIC_API_KEY` or other provider keys during `/graphify` skill runs — the host IDE session provides the LLM (PR #864)
+
+## 0.7.18 (2026-05-14)
+
+- Fix: `graphify update` is now idempotent — graph.json and GRAPH_REPORT.md are only rewritten when content actually changes; topology comparison short-circuits clustering entirely on unchanged graphs, eliminating residual community-count drift (#824)
+- Fix: community IDs are now stable across rebuilds — Leiden/Louvain receive deterministically sorted input and a fixed random seed; greedy overlap remapper preserves existing IDs so hand-edited `.graphify_labels.json` labels don't drift onto wrong communities (#824)
+- Fix: `--no-cluster` flag added to `graphify update` — writes raw AST graph without clustering, consistent with `graphify extract --no-cluster` (#824)
+- Fix: `graphify update --no-cluster` now writes `"links"` key matching the schema of the full clustered path; previously wrote `"edges"`, causing schema toggle on every mode switch
+- Fix: `.graphify_labels.json` was rewritten on every rebuild even when nothing changed; now only written when outputs actually change
+- Fix: shrink-check (refuse overwrite when new graph has fewer nodes) was duplicated across two code paths; unified into a single `_check_shrink()` helper
+- Fix: node ID format in skill.md corrected to `{parent_dir}_{filename_stem}_{entity}` — the old filename-only format caused ghost-duplicate nodes when AST and semantic extractors disagreed on the stem; top-level files use just the filename stem; existing graphs with ghost duplicates can be cleaned up with `graphify extract --force`
+- Fix: safer JSON serialization in clustering sort keys (`default=str`) prevents crashes when edge attributes contain non-serializable values
+- Docs: added Prerequisites, optional extras table, environment variables reference, troubleshooting, and dev setup to README (#833)
+
+## 0.7.17 (2026-05-13)
+
+- Fix: `graphify path` and `graphify explain` now render arrow direction correctly — `-->` for caller→callee, `<--` for callee←caller; previously the graph was loaded undirected so every hop printed `-->` regardless of stored direction (#849, #853)
+- Fix: MCP `shortest_path` and `get_neighbors` tools had the same reversed-arrow bug; now fixed in `serve.py` alongside the CLI commands (#849, #853)
+- Fix: `graphify extract --backend bedrock` was rejected by the CLI guard even when `AWS_PROFILE`/`AWS_REGION`/`AWS_DEFAULT_REGION`/`AWS_ACCESS_KEY_ID` were set — boto3 session auth was never reached (#846)
+- Fix: BFS/DFS query traversal now skips expanding high-degree hub nodes (threshold: `max(50, p99_degree)`) as transit — hubs can still be destinations but no longer produce semantically meaningless 2-hop paths like `ClassA → View → ClassB` in Android/Spring corpora (#830)
+- Fix: `--update` manifest shrink — after an incremental run, `manifest.json` was overwritten with only the changed-file subset, causing the next `--update` to re-flag the entire unchanged corpus as new; Step 9 now persists the full corpus via `all_files` fallback (#837)
+- Fix: `file_type` enum aligned across `skill.md` and `llm.py` (both now enumerate all six values: `code`, `document`, `paper`, `image`, `rationale`, `concept`); synonym mapper in `build.py` silently coerces known LLM-emitted synonyms (`pattern→concept`, `markdown→document`, `tool→code`, etc.) before validation (#840)
+- Fix: Fortran test fixture renamed `sample.F90` → `sample_preprocessed.F90` to avoid case-collision with `sample.f90` on macOS case-insensitive filesystems (credit: @FatahChan, #823)
+
+## 0.7.16 (2026-05-12)
+
+- Fix: all `read_text()`/`write_text()` calls in `skill.md` and `skill-windows.md` now specify `encoding="utf-8"` — bare calls defaulted to the system codepage on Chinese-locale Windows, silently mojibaking node labels and Markdown content on `--update` (#832)
+- Fix: `json.dumps` in skill pipeline now uses `ensure_ascii=False` so Chinese/CJK characters are stored as-is rather than `\uXXXX` escaped (#832)
+- Fix: Step 1 install fallback in skill now prefers `uv tool install --upgrade graphifyy` over `pip` when uv is on PATH — pip was installing to the wrong environment when graphify was originally installed via `uv tool` (#831)
+- Fix: `_score_nodes` in `serve.py` now uses three-tier precedence (exact 1000 / prefix 100 / substring 1) instead of flat substring scoring — `graphify path "Foo" "FooBar"` no longer returns 0 hops when both labels substring-match the same node (#828)
+- Fix: `graphify path` and MCP `_tool_shortest_path` now emit a clear error when source and target resolve to the same node, instead of silently returning 0 hops (#828)
+- Fix: `file_hash` in `cache.py` now normalises path keys via `.as_posix().lower()` — Windows junction/case variants of the same file now hash identically, fixing `save_semantic_cache` always reporting "Cached 0 files" on subsequent `--update` runs (#826)
+- Fix: `check_semantic_cache` now applies the same absolute-path normalization as `save_semantic_cache` so relative `source_file` paths resolve consistently on both sides (#826)
+- Fix: `_AGENTS_MD_SECTION` now includes the `/graphify` skill trigger instruction — all 7 AGENTS.md platforms (OpenCode, Codex, Aider, Trae, Hermes, OpenClaw, Factory Droid) now correctly invoke the skill tool when the user types `/graphify` (#827)
+
+## 0.7.15 (2026-05-11)
+
+- Fix: `-h`/`--help`/`-?` in any position now stops execution — previously `graphify cursor install --help` silently installed into Cursor; `graphify benchmark --help` crashed with FileNotFoundError (#821)
+- Fix: `--version`, `-v`, and `graphify version` now print the installed version and exit (#818)
+- Fix: `GRAPHIFY_OLLAMA_NUM_CTX=<invalid>` no longer falls back to hardcoded 131072 (which exhausted VRAM) — it now falls through to the auto-derived value and prints a warning (#820)
+- Fix: when `GRAPHIFY_OLLAMA_NUM_CTX` is set smaller than the estimated chunk size, graphify now warns explicitly that Ollama will silently truncate the prompt and suggests a corrected `--token-budget` (#820)
+
+## 0.7.14 (2026-05-11)
+
+- Fix: `_make_id` and `_normalize_id` now apply NFKC Unicode normalization before ID generation -- composed/decomposed forms of the same character (e.g. `é` typed vs pasted from a PDF) now produce the same node ID; switched from `.lower()` to `.casefold()` for correct Turkish/German/Greek case folding; both functions are now byte-for-byte equivalent (#811)
+- Fix: non-ASCII identifiers (CJK, Cyrillic, Arabic, accented Latin) are no longer collapsed to a bare file stem -- `[^\w]+` with `re.UNICODE` replaces the old `[^a-zA-Z0-9]+` so Unicode word chars are preserved as part of the ID (#811)
+- Fix: dedup edge remap uses explicit key-presence check instead of `or` so empty-string `source` is not silently swapped for `from`; stale `from`/`to` keys are now popped before the edge is emitted so they can't leak into `graph.json` edge attributes (#803)
+- Fix: `--update` merge now calls `build_merge()` directly instead of an inline NetworkX round-trip that re-introduced the direction-flip bug from #760; dict merge ordering fixed so explicit `source`/`target` always win over stale attrs; hyperedges pulled from `G.graph` (merged) rather than just the new extraction (#801)
+- Fix: subagent chunk files are now written to an absolute path (`CHUNK_PATH` injected at dispatch time from `graphify-out/.graphify_root`) so the Write tool doesn't lose chunks to an undefined working directory (#808)
+- Fix: skill version mismatch warning is now suppressed during `hook-check` (runs on every editor tool use and must be silent) and routed to stderr for all other commands
+
 ## 0.7.13 (2026-05-09)
 
 - Fix: Ollama `num_ctx` now derived from actual chunk size instead of hardcoded 131072 -- over-allocating 128k KV-cache slots for small chunks exhausted VRAM by chunk 4 on large models; formula is `min(input_tokens + output_cap + 2000, 131072)` so `--token-budget 8192` gets ~26k instead of 131072 (#798)

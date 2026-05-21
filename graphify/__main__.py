@@ -33,7 +33,7 @@ def _check_skill_version(skill_dst: Path) -> None:
         return
     installed = version_file.read_text(encoding="utf-8").strip()
     if installed != __version__:
-        print(f"  warning: skill is from graphify {installed}, package is {__version__}. Run 'graphify install' to update.")
+        print(f"  warning: skill is from graphify {installed}, package is {__version__}. Run 'graphify install' to update.", file=sys.stderr)
 
 
 def _refresh_all_version_stamps() -> None:
@@ -62,7 +62,7 @@ _SETTINGS_HOOK = {
                 "case \"$CMD\" in "
                 r"*grep*|*rg\ *|*ripgrep*|*find\ *|*fd\ *|*ack\ *|*ag\ *) "
                 "  [ -f graphify-out/graph.json ] && "
-                r"""  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"graphify: Knowledge graph exists. Read graphify-out/GRAPH_REPORT.md for god nodes and community structure before searching raw files."}}' """
+                r"""  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"graphify: knowledge graph at graphify-out/. For focused questions, run `graphify query \"<question>\"` (scoped subgraph, usually much smaller than GRAPH_REPORT.md) instead of grepping raw files. Read GRAPH_REPORT.md only for broad architecture context."}}' """
                 "  || true ;; "
                 "esac"
             ),
@@ -142,6 +142,11 @@ _PLATFORM_CONFIG: dict[str, dict] = {
     },
     "antigravity": {
         "skill_file": "skill.md",
+        "skill_dst": Path(".agents") / "skills" / "graphify" / "SKILL.md",
+        "claude_md": False,
+    },
+    "antigravity-windows": {
+        "skill_file": "skill-windows.md",
         "skill_dst": Path(".agents") / "skills" / "graphify" / "SKILL.md",
         "claude_md": False,
     },
@@ -238,6 +243,51 @@ def _omp_uninstall() -> None:
             config_yml.write_text(content, encoding="utf-8")
             print(f"  config.yml extensions ->  entry removed")
 
+def _replace_or_append_section(content: str, marker: str, new_section: str) -> str:
+    """Idempotently update or append a graphify-owned section in shared files.
+
+    If ``marker`` is not in ``content``, append ``new_section`` to the end
+    (with a blank-line separator if there's existing content).
+
+    If ``marker`` IS in ``content``, replace the existing section in place.
+    The section runs from the first line containing ``marker`` to the line
+    before the next H2 heading (``## `` at line start), or to EOF if no later
+    H2 exists. This lets older installs receive the updated copy without
+    users having to uninstall and reinstall — important for the issue #580
+    fix where existing report-first text would otherwise silently linger.
+    """
+    if marker not in content:
+        if content.strip():
+            return content.rstrip() + "\n\n" + new_section.lstrip()
+        return new_section.lstrip()
+
+    lines = content.split("\n")
+    start = next((i for i, line in enumerate(lines) if marker in line), None)
+    if start is None:
+        return content.rstrip() + "\n\n" + new_section.lstrip()
+
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if lines[j].startswith("## "):
+            end = j
+            break
+
+    head = "\n".join(lines[:start]).rstrip()
+    tail = "\n".join(lines[end:]).lstrip()
+    section = new_section.strip()
+
+    parts: list[str] = []
+    if head:
+        parts.append(head)
+    parts.append(section)
+    if tail:
+        parts.append(tail)
+    out = "\n\n".join(parts)
+    if not out.endswith("\n"):
+        out += "\n"
+    return out
+
+
 def install(platform: str = "claude") -> None:
     if platform == "gemini":
         gemini_install()
@@ -245,6 +295,9 @@ def install(platform: str = "claude") -> None:
     if platform == "cursor":
         _cursor_install(Path("."))
         return
+    # On Windows, antigravity needs the PowerShell skill, not the bash one
+    if platform == "antigravity" and sys.platform == "win32":
+        platform = "antigravity-windows"
     if platform not in _PLATFORM_CONFIG:
         print(
             f"error: unknown platform '{platform}'. Choose from: {', '.join(_PLATFORM_CONFIG)}, gemini, cursor",
@@ -319,9 +372,9 @@ _CLAUDE_MD_SECTION = """\
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
 
 Rules:
-- ALWAYS read graphify-out/GRAPH_REPORT.md before reading any source files, running grep/glob searches, or answering codebase questions. The graph is your primary map of the codebase.
-- IF graphify-out/wiki/index.md EXISTS, navigate it instead of reading raw files
-- For cross-module "how does X relate to Y" questions, prefer `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"` over grep — these traverse the graph's EXTRACTED + INFERRED edges instead of scanning files
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
 """
 
@@ -334,10 +387,13 @@ _AGENTS_MD_SECTION = """\
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
 
+When the user types `/graphify`, invoke the `skill` tool with `skill: "graphify"` before doing anything else.
+
 Rules:
-- ALWAYS read graphify-out/GRAPH_REPORT.md before reading any source files, running grep/glob searches, or answering codebase questions. The graph is your primary map of the codebase.
-- IF graphify-out/wiki/index.md EXISTS, navigate it instead of reading raw files
-- For cross-module "how does X relate to Y" questions, prefer `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"` over grep — these traverse the graph's EXTRACTED + INFERRED edges instead of scanning files
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- Dirty graphify-out/ files are expected after hooks or incremental updates; dirty graph files are not a reason to skip graphify. Only skip graphify if the task is about stale or incorrect graph output, or the user explicitly says not to use it.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
 """
 
@@ -349,9 +405,9 @@ _GEMINI_MD_SECTION = """\
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
 
 Rules:
-- ALWAYS read graphify-out/GRAPH_REPORT.md before reading any source files, running grep/glob searches, or answering codebase questions. The graph is your primary map of the codebase.
-- IF graphify-out/wiki/index.md EXISTS, navigate it instead of reading raw files
-- For cross-module "how does X relate to Y" questions, prefer `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"` over grep — these traverse the graph's EXTRACTED + INFERRED edges instead of scanning files
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
 """
 
@@ -367,7 +423,7 @@ _GEMINI_HOOK = {
                 "import sys,pathlib,json;"
                 "e=pathlib.Path('graphify-out/graph.json').exists();"
                 "d={'decision':'allow'};"
-                "e and d.update({'additionalContext':'graphify: Knowledge graph exists. Read graphify-out/GRAPH_REPORT.md for god nodes and community structure before searching raw files.'});"
+                "e and d.update({'additionalContext':'graphify: knowledge graph at graphify-out/. For focused questions, run `graphify query \"<question>\"` (scoped subgraph, usually much smaller than GRAPH_REPORT.md) instead of grepping raw files. Read GRAPH_REPORT.md only for broad architecture context.'});"
                 "sys.stdout.write(json.dumps(d))"
                 '"'
             ),
@@ -394,15 +450,20 @@ def gemini_install(project_dir: Path | None = None) -> None:
 
     if target.exists():
         content = target.read_text(encoding="utf-8")
-        if _GEMINI_MD_MARKER in content:
-            print("graphify already configured in GEMINI.md")
-        else:
-            target.write_text(content.rstrip() + "\n\n" + _GEMINI_MD_SECTION, encoding="utf-8")
-            print(f"graphify section written to {target.resolve()}")
+        new_content = _replace_or_append_section(
+            content, _GEMINI_MD_MARKER, _GEMINI_MD_SECTION
+        )
     else:
-        target.write_text(_GEMINI_MD_SECTION, encoding="utf-8")
+        new_content = _GEMINI_MD_SECTION
+
+    if target.exists() and new_content == target.read_text(encoding="utf-8"):
+        print(f"graphify already configured in {target.resolve()} (no change)")
+    else:
+        target.write_text(new_content, encoding="utf-8")
         print(f"graphify section written to {target.resolve()}")
 
+    # Always re-install the Gemini hook so an older payload (e.g. pre-issue-#580
+    # wording) is replaced on upgrade.
     _install_gemini_hook(project_dir or Path("."))
     print()
     print("Gemini CLI will now check the knowledge graph before answering")
@@ -482,14 +543,18 @@ _VSCODE_INSTRUCTIONS_SECTION = """\
 ## graphify
 
 For any question about this repo's architecture, structure, components, or how to add/modify/find
-code, your **first tool call must be** to read `graphify-out/GRAPH_REPORT.md` (if it exists).
+code, your first action should be `graphify query "<question>"` when `graphify-out/graph.json`
+exists. Use `graphify path "<A>" "<B>"` for relationship questions and `graphify explain "<concept>"`
+for focused-concept questions. These return a scoped subgraph, usually much smaller than the full
+report or raw grep output.
 
 Triggers: "how do I…", "where is…", "what does … do", "add/modify a <component>",
 "explain the architecture", or anything that depends on how files or classes relate.
 
-After reading the report (and `graphify-out/wiki/index.md` for deep questions), answer from the
-graph. Only read source files when (a) modifying/debugging specific code, (b) the graph lacks
-the needed detail, or (c) the graph is missing or stale.
+If `graphify-out/wiki/index.md` exists, use it for broad navigation. Read `graphify-out/GRAPH_REPORT.md`
+only for broad architecture review or when query/path/explain do not surface enough context. Only read
+source files when (a) modifying/debugging specific code, (b) the graph lacks the needed detail, or
+(c) the graph is missing or stale.
 
 Type `/graphify` in Copilot Chat to build or update the graph.
 """
@@ -510,11 +575,14 @@ def vscode_install(project_dir: Path | None = None) -> None:
     instructions.parent.mkdir(parents=True, exist_ok=True)
     if instructions.exists():
         content = instructions.read_text(encoding="utf-8")
-        if _VSCODE_INSTRUCTIONS_MARKER in content:
+        new_content = _replace_or_append_section(
+            content, _VSCODE_INSTRUCTIONS_MARKER, _VSCODE_INSTRUCTIONS_SECTION
+        )
+        if new_content == content:
             print(f"  {instructions}  ->  already configured (no change)")
         else:
-            instructions.write_text(content.rstrip() + "\n\n" + _VSCODE_INSTRUCTIONS_SECTION, encoding="utf-8")
-            print(f"  {instructions}  ->  graphify section added")
+            instructions.write_text(new_content, encoding="utf-8")
+            print(f"  {instructions}  ->  graphify section {'updated' if _VSCODE_INSTRUCTIONS_MARKER in content else 'added'}")
     else:
         instructions.write_text(_VSCODE_INSTRUCTIONS_SECTION, encoding="utf-8")
         print(f"  {instructions}  ->  created")
@@ -560,7 +628,7 @@ _ANTIGRAVITY_WORKFLOW_PATH = Path(".agents") / "workflows" / "graphify.md"
 _ANTIGRAVITY_RULES = """\
 ---
 trigger: always_on
-description: Always consult the graphify knowledge graph at graphify-out/ before answering codebase or architecture questions.
+description: Consult the graphify knowledge graph at graphify-out/ for codebase and architecture questions.
 ---
 
 ## graphify
@@ -568,10 +636,9 @@ description: Always consult the graphify knowledge graph at graphify-out/ before
 This project has a graphify knowledge graph at graphify-out/.
 
 Rules:
-- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
+- For codebase or architecture questions, when `graphify-out/graph.json` exists, first run `graphify query "<question>"` (CLI) or `query_graph` (MCP). Use `graphify path "<A>" "<B>"` / `shortest_path` for relationships and `graphify explain "<concept>"` / `get_node` for focused concepts. These return a scoped subgraph, usually much smaller than `GRAPH_REPORT.md` or raw grep output.
 - If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
-- If the graphify MCP server is active, utilize tools like `query_graph`, `get_node`, and `shortest_path` for precise architecture navigation instead of falling back to `grep`
-- If the MCP server is not active, the CLI equivalents are `graphify query "<question>"`, `graphify path "<A>" "<B>"`, and `graphify explain "<concept>"` - prefer these over grep for cross-module questions
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context
 - After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)
 """
 
@@ -595,9 +662,10 @@ inclusion: always
 ---
 
 graphify: A knowledge graph of this project lives in `graphify-out/`. \
-If `graphify-out/GRAPH_REPORT.md` exists, read it before answering architecture questions, \
-tracing dependencies, or searching files — it contains god nodes, community structure, \
-and surprising connections the graph found. Navigate by graph structure instead of grepping raw files.
+For codebase, architecture, or dependency questions, when `graphify-out/graph.json` exists, \
+first run `graphify query "<question>"` (or `graphify path "<A>" "<B>"` / `graphify explain "<concept>"`). \
+These return a scoped subgraph, usually much smaller than `GRAPH_REPORT.md` or raw grep output. \
+Read `GRAPH_REPORT.md` only for broad architecture review or when those commands do not surface enough context.
 """
 
 _KIRO_STEERING_MARKER = "graphify: A knowledge graph of this project"
@@ -618,11 +686,14 @@ def _kiro_install(project_dir: Path) -> None:
     steering_dir = project_dir / ".kiro" / "steering"
     steering_dir.mkdir(parents=True, exist_ok=True)
     steering_dst = steering_dir / "graphify.md"
-    if steering_dst.exists() and _KIRO_STEERING_MARKER in steering_dst.read_text(encoding="utf-8"):
-        print(f"  .kiro/steering/graphify.md  ->  already configured")
+    if steering_dst.exists() and steering_dst.read_text(encoding="utf-8") == _KIRO_STEERING:
+        print(f"  .kiro/steering/graphify.md  ->  already configured (no change)")
     else:
+        # File is wholly graphify-owned. Overwrite on upgrade so older
+        # report-first wording does not silently linger (issue #580).
+        action = "updated" if steering_dst.exists() else "written"
         steering_dst.write_text(_KIRO_STEERING, encoding="utf-8")
-        print(f"  .kiro/steering/graphify.md  ->  always-on steering written")
+        print(f"  .kiro/steering/graphify.md  ->  always-on steering {action}")
 
     print()
     print("Kiro will now read the knowledge graph before every conversation.")
@@ -674,7 +745,7 @@ def _antigravity_install(project_dir: Path) -> None:
             rules_path.write_text(_ANTIGRAVITY_RULES, encoding="utf-8")
             print(f"graphify rule updated at {rules_path.resolve()}")
         else:
-            print(f"graphify rule already up to date at {rules_path.resolve()}")
+            print(f"graphify rule already configured at {rules_path.resolve()} (no change)")
     else:
         rules_path.write_text(_ANTIGRAVITY_RULES, encoding="utf-8")
         print(f"graphify rule written to {rules_path.resolve()}")
@@ -688,7 +759,7 @@ def _antigravity_install(project_dir: Path) -> None:
             wf_path.write_text(_ANTIGRAVITY_WORKFLOW, encoding="utf-8")
             print(f"graphify workflow updated at {wf_path.resolve()}")
         else:
-            print(f"graphify workflow already up to date at {wf_path.resolve()}")
+            print(f"graphify workflow already configured at {wf_path.resolve()} (no change)")
     else:
         wf_path.write_text(_ANTIGRAVITY_WORKFLOW, encoding="utf-8")
         print(f"graphify workflow written to {wf_path.resolve()}")
@@ -744,8 +815,9 @@ alwaysApply: true
 
 This project has a graphify knowledge graph at graphify-out/.
 
-- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
+- For codebase or architecture questions, when `graphify-out/graph.json` exists, first run `graphify query "<question>"` (or `graphify path "<A>" "<B>"` / `graphify explain "<concept>"`). These return a scoped subgraph, usually much smaller than `GRAPH_REPORT.md` or raw grep output.
 - If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context
 - After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)
 """
 
@@ -754,11 +826,14 @@ def _cursor_install(project_dir: Path) -> None:
     """Write .cursor/rules/graphify.mdc with alwaysApply: true."""
     rule_path = (project_dir or Path(".")) / _CURSOR_RULE_PATH
     rule_path.parent.mkdir(parents=True, exist_ok=True)
-    if rule_path.exists():
-        print(f"graphify rule already exists at {rule_path} (no change)")
+    if rule_path.exists() and rule_path.read_text(encoding="utf-8") == _CURSOR_RULE:
+        print(f"graphify rule at {rule_path} already configured (no change)")
         return
+    # File is wholly graphify-owned. Overwrite on upgrade so older
+    # report-first wording does not silently linger (issue #580).
+    action = "updated" if rule_path.exists() else "written"
     rule_path.write_text(_CURSOR_RULE, encoding="utf-8")
-    print(f"graphify rule written to {rule_path.resolve()}")
+    print(f"graphify rule {action} at {rule_path.resolve()}")
     print()
     print("Cursor will now always include the knowledge graph context.")
     print("Run /graphify . first to build the graph if you haven't already.")
@@ -792,7 +867,7 @@ export const GraphifyPlugin = async ({ directory }) => {
 
       if (input.tool === "bash") {
         output.args.command =
-          'echo "[graphify] Knowledge graph available. Read graphify-out/GRAPH_REPORT.md for god nodes and architecture context before searching files." && ' +
+          'echo "[graphify] knowledge graph at graphify-out/. For focused questions, run \\`graphify query \\"<question>\\"\\` (scoped subgraph, usually much smaller than GRAPH_REPORT.md) instead of grepping raw files. Read GRAPH_REPORT.md only for broad architecture context." && ' +
           output.args.command;
         reminded = true;
       }
@@ -950,13 +1025,16 @@ def _agents_install(project_dir: Path, platform: str) -> None:
 
     if target.exists():
         content = target.read_text(encoding="utf-8")
-        if _AGENTS_MD_MARKER in content:
-            print(f"graphify already configured in AGENTS.md")
-        else:
-            target.write_text(content.rstrip() + "\n\n" + _AGENTS_MD_SECTION, encoding="utf-8")
-            print(f"graphify section written to {target.resolve()}")
+        new_content = _replace_or_append_section(
+            content, _AGENTS_MD_MARKER, _AGENTS_MD_SECTION
+        )
     else:
-        target.write_text(_AGENTS_MD_SECTION, encoding="utf-8")
+        new_content = _AGENTS_MD_SECTION
+
+    if target.exists() and new_content == target.read_text(encoding="utf-8"):
+        print(f"graphify already configured in {target.resolve()} (no change)")
+    else:
+        target.write_text(new_content, encoding="utf-8")
         print(f"graphify section written to {target.resolve()}")
 
     if platform == "codex":
@@ -1009,17 +1087,20 @@ def claude_install(project_dir: Path | None = None) -> None:
 
     if target.exists():
         content = target.read_text(encoding="utf-8")
-        if _CLAUDE_MD_MARKER in content:
-            print("graphify already configured in CLAUDE.md")
-            return
-        new_content = content.rstrip() + "\n\n" + _CLAUDE_MD_SECTION
+        new_content = _replace_or_append_section(
+            content, _CLAUDE_MD_MARKER, _CLAUDE_MD_SECTION
+        )
     else:
         new_content = _CLAUDE_MD_SECTION
 
-    target.write_text(new_content, encoding="utf-8")
-    print(f"graphify section written to {target.resolve()}")
+    if target.exists() and new_content == target.read_text(encoding="utf-8"):
+        print(f"graphify already configured in {target.resolve()} (no change)")
+    else:
+        target.write_text(new_content, encoding="utf-8")
+        print(f"graphify section written to {target.resolve()}")
 
-    # Also write Claude Code PreToolUse hook to .claude/settings.json
+    # Always re-install the Claude Code PreToolUse hook so an old hook
+    # payload (e.g. pre-issue-#580 wording) is replaced on upgrade.
     _install_claude_hook(project_dir or Path("."))
 
     print()
@@ -1198,12 +1279,18 @@ def _clone_repo(url: str, branch: str | None = None, out_dir: Path | None = None
 def main() -> None:
     # Check all known skill install locations for a stale version stamp.
     # Skip during install/uninstall (hook writes trigger a fresh check anyway).
+    # Skip during hook-check — it runs on every editor tool use and must be silent.
     # Deduplicate paths so platforms sharing the same install dir don't warn twice.
-    if not any(arg in ("install", "uninstall") for arg in sys.argv):
+    _silent_cmds = {"install", "uninstall", "hook-check"}
+    if not any(arg in _silent_cmds for arg in sys.argv):
         for skill_dst in {Path.home() / cfg["skill_dst"] for cfg in _PLATFORM_CONFIG.values()}:
             _check_skill_version(skill_dst)
 
-    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+    if len(sys.argv) >= 2 and sys.argv[1] in ("-v", "--version", "version"):
+        print(f"graphify {__version__}")
+        return
+
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "-?"):
         print("Usage: graphify <command>")
         print()
         print("Commands:")
@@ -1228,6 +1315,7 @@ def main() -> None:
         print("  update <path>           re-extract code files and update the graph (no LLM needed)")
         print("    --force                 overwrite graph.json even if the rebuild has fewer nodes")
         print("                            (also: GRAPHIFY_FORCE=1 env var; use after refactors that delete code)")
+        print("    --no-cluster            skip clustering, write raw extraction only")
         print("  cluster-only <path>     rerun clustering on an existing graph.json and regenerate report")
         print("    --no-viz                skip graph.html generation (useful for >5000 node graphs / CI)")
         print("    --graph <path>          path to graph.json (default <path>/graphify-out/graph.json)")
@@ -1251,7 +1339,7 @@ def main() -> None:
         print("    --top-k-edges N         per-symbol outbound edges in inspector (default 12)")
         print("    --label NAME            project label in header")
         print("  extract <path>          headless full extraction (AST + semantic LLM) for CI/scripts")
-        print("    --backend B             gemini|kimi|claude|openai|ollama (default: whichever API key is set)")
+        print("    --backend B             gemini|kimi|claude|openai|deepseek|ollama (default: whichever API key is set)")
         print("    --model M               override backend default model")
         print("    --max-workers N         AST extraction subprocess count (default: cpu_count)")
         print("    --token-budget N        per-chunk token cap for semantic extraction (default: 60000)")
@@ -1310,6 +1398,17 @@ def main() -> None:
         return
 
     cmd = sys.argv[1]
+
+    # Universal help guard: -h/--help/-? anywhere after the command shows help
+    # and stops — prevents flags from silently triggering destructive subcommands
+    # (e.g. "cursor install --help" was silently installing into Cursor, #821).
+    # Exempt: free-text commands (user string may contain these tokens), and
+    # "install"/"uninstall" which have their own per-subcommand help handlers.
+    _FREE_TEXT_CMDS = {"query", "explain", "path", "save-result", "install", "uninstall"}
+    if cmd not in _FREE_TEXT_CMDS and any(a in {"-h", "--help", "-?"} for a in sys.argv[2:]):
+        print(f"Run 'graphify --help' for full usage.")
+        return
+
     if cmd == "install":
         # Default to windows platform on Windows, claude elsewhere
         default_platform = "windows" if platform.system() == "Windows" else "claude"
@@ -1468,6 +1567,9 @@ def main() -> None:
         else:
             print("Usage: graphify antigravity [install|uninstall]", file=sys.stderr)
             sys.exit(1)
+    elif cmd == "prs":
+        from graphify.prs import cmd_prs
+        cmd_prs(sys.argv[2:])
     elif cmd == "hook":
         from graphify.hooks import install as hook_install, uninstall as hook_uninstall, status as hook_status
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -1589,6 +1691,8 @@ def main() -> None:
         _raw = json.loads(gp.read_text(encoding="utf-8"))
         if "links" not in _raw and "edges" in _raw:
             _raw = dict(_raw, links=_raw["edges"])
+        # Force directed so the renderer can recover stored caller→callee direction.
+        _raw = {**_raw, "directed": True}
         try:
             G = json_graph.node_link_graph(_raw, edges="links")
         except TypeError:
@@ -1602,8 +1706,27 @@ def main() -> None:
             print(f"No node matching '{target_label}' found.", file=sys.stderr)
             sys.exit(1)
         src_nid, tgt_nid = src_scored[0][1], tgt_scored[0][1]
+        # Ambiguity guard: when both queries resolve to the same node, the
+        # shortest path is trivially zero hops, which is almost never what the
+        # caller wanted (see bug #828).
+        if src_nid == tgt_nid:
+            print(
+                f"'{source_label}' and '{target_label}' both resolved to the same "
+                f"node '{src_nid}'. Use a more specific label or the exact node ID.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        for _name, _scored in (("source", src_scored), ("target", tgt_scored)):
+            if len(_scored) >= 2:
+                _top, _runner = _scored[0][0], _scored[1][0]
+                if _top > 0 and (_top - _runner) / _top < 0.10:
+                    print(
+                        f"warning: {_name} match was ambiguous "
+                        f"(top score {_top:g}, runner-up {_runner:g})",
+                        file=sys.stderr,
+                    )
         try:
-            path_nodes = _nx.shortest_path(G, src_nid, tgt_nid)
+            path_nodes = _nx.shortest_path(G.to_undirected(as_view=True), src_nid, tgt_nid)
         except (_nx.NetworkXNoPath, _nx.NodeNotFound):
             print(f"No path found between '{source_label}' and '{target_label}'.")
             sys.exit(0)
@@ -1612,13 +1735,22 @@ def main() -> None:
         from graphify.build import edge_data
         for i in range(len(path_nodes) - 1):
             u, v = path_nodes[i], path_nodes[i + 1]
-            edata = edge_data(G, u, v)
+            # Check which direction the stored edge points.
+            if G.has_edge(u, v):
+                edata = edge_data(G, u, v)
+                forward = True
+            else:
+                edata = edge_data(G, v, u)
+                forward = False
             rel = edata.get("relation", "")
             conf = edata.get("confidence", "")
             conf_str = f" [{conf}]" if conf else ""
             if i == 0:
                 segments.append(G.nodes[u].get("label", u))
-            segments.append(f"--{rel}{conf_str}--> {G.nodes[v].get('label', v)}")
+            if forward:
+                segments.append(f"--{rel}{conf_str}--> {G.nodes[v].get('label', v)}")
+            else:
+                segments.append(f"<--{rel}{conf_str}-- {G.nodes[v].get('label', v)}")
         print(f"Shortest path ({hops} hops):\n  " + " ".join(segments))
 
     elif cmd == "explain":
@@ -1640,6 +1772,8 @@ def main() -> None:
         _raw = json.loads(gp.read_text(encoding="utf-8"))
         if "links" not in _raw and "edges" in _raw:
             _raw = dict(_raw, links=_raw["edges"])
+        # Force directed so the renderer can recover stored caller→callee direction.
+        _raw = {**_raw, "directed": True}
         try:
             G = json_graph.node_link_graph(_raw, edges="links")
         except TypeError:
@@ -1656,17 +1790,22 @@ def main() -> None:
         print(f"  Type:      {d.get('file_type', '')}")
         print(f"  Community: {d.get('community', '')}")
         print(f"  Degree:    {G.degree(nid)}")
-        neighbors = list(G.neighbors(nid))
-        if neighbors:
-            from graphify.build import edge_data
-            print(f"\nConnections ({len(neighbors)}):")
-            for nb in sorted(neighbors, key=lambda n: G.degree(n), reverse=True)[:20]:
-                edata = edge_data(G, nid, nb)
+        from graphify.build import edge_data
+        connections: list[tuple[str, str, dict]] = []  # (direction, neighbor_id, edge_data)
+        for nb in G.successors(nid):
+            connections.append(("out", nb, edge_data(G, nid, nb)))
+        for nb in G.predecessors(nid):
+            connections.append(("in", nb, edge_data(G, nb, nid)))
+        if connections:
+            print(f"\nConnections ({len(connections)}):")
+            connections.sort(key=lambda c: G.degree(c[1]), reverse=True)
+            for direction, nb, edata in connections[:20]:
                 rel = edata.get("relation", "")
                 conf = edata.get("confidence", "")
-                print(f"  --> {G.nodes[nb].get('label', nb)} [{rel}] [{conf}]")
-            if len(neighbors) > 20:
-                print(f"  ... and {len(neighbors) - 20} more")
+                arrow = "-->" if direction == "out" else "<--"
+                print(f"  {arrow} {G.nodes[nb].get('label', nb)} [{rel}] [{conf}]")
+            if len(connections) > 20:
+                print(f"  ... and {len(connections) - 20} more")
 
     elif cmd == "add":
         if len(sys.argv) < 3:
@@ -1717,11 +1856,21 @@ def main() -> None:
         args = sys.argv[2:]
         watch_path: Path | None = None
         graph_override: Path | None = None
+        co_resolution: float = 1.0
+        co_exclude_hubs: float | None = None
         i_arg = 0
         while i_arg < len(args):
             a = args[i_arg]
             if a == "--graph" and i_arg + 1 < len(args):
                 graph_override = Path(args[i_arg + 1]); i_arg += 2
+            elif a == "--resolution" and i_arg + 1 < len(args):
+                co_resolution = float(args[i_arg + 1]); i_arg += 2
+            elif a.startswith("--resolution="):
+                co_resolution = float(a.split("=", 1)[1]); i_arg += 1
+            elif a == "--exclude-hubs" and i_arg + 1 < len(args):
+                co_exclude_hubs = float(args[i_arg + 1]); i_arg += 2
+            elif a.startswith("--exclude-hubs="):
+                co_exclude_hubs = float(a.split("=", 1)[1]); i_arg += 1
             elif a == "--no-viz" or a.startswith("--min-community-size="):
                 i_arg += 1
             elif a.startswith("--"):
@@ -1748,11 +1897,12 @@ def main() -> None:
         G = build_from_json(_raw, directed=_directed)
         print(f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
         print("Re-clustering...")
-        communities = cluster(G)
+        communities = cluster(G, resolution=co_resolution, exclude_hubs_percentile=co_exclude_hubs)
         cohesion = score_all(G, communities)
         gods = god_nodes(G)
         surprises = surprising_connections(G, communities)
         out = watch_path / "graphify-out"
+        out.mkdir(parents=True, exist_ok=True)
         labels_path = out / ".graphify_labels.json"
         if labels_path.exists():
             try:
@@ -1770,6 +1920,8 @@ def main() -> None:
                           tokens, str(watch_path), suggested_questions=questions,
                           min_community_size=min_community_size, built_at_commit=_commit)
         (out / "GRAPH_REPORT.md").write_text(report, encoding="utf-8")
+        from graphify.export import backup_if_protected as _backup
+        _backup(out)
         to_json(G, communities, str(out / "graph.json"))
         labels_path.write_text(json.dumps({str(k): v for k, v in labels.items()}, ensure_ascii=False), encoding="utf-8")
 
@@ -1794,12 +1946,26 @@ def main() -> None:
 
     elif cmd == "update":
         force = os.environ.get("GRAPHIFY_FORCE", "").lower() in ("1", "true", "yes")
-        argv = list(sys.argv)
-        if "--force" in argv[2:]:
-            force = True
-            argv = [a for a in argv if a != "--force"]
-        if len(argv) > 2:
-            watch_path = Path(argv[2])
+        no_cluster = False
+        args = sys.argv[2:]
+        watch_arg: str | None = None
+        for a in args:
+            if a == "--force":
+                force = True
+                continue
+            if a == "--no-cluster":
+                no_cluster = True
+                continue
+            if a.startswith("-"):
+                print(f"error: unknown update option: {a}", file=sys.stderr)
+                sys.exit(2)
+            if watch_arg is not None:
+                print("error: update accepts at most one path argument", file=sys.stderr)
+                sys.exit(2)
+            watch_arg = a
+
+        if watch_arg is not None:
+            watch_path = Path(watch_arg)
         else:
             # Try to recover the scan root saved by the last full build
             saved = Path(_GRAPHIFY_OUT) / ".graphify_root"
@@ -1815,13 +1981,14 @@ def main() -> None:
         # Interactive CLI: block on the per-repo lock rather than skip, so the
         # user sees their explicit `graphify update` complete instead of
         # exiting silently when a hook-driven rebuild happens to be running.
-        ok = _rebuild_code(watch_path, force=force, block_on_lock=True)
+        ok = _rebuild_code(watch_path, force=force, no_cluster=no_cluster, block_on_lock=True)
         if ok:
             print("Code graph updated. For doc/paper/image changes run /graphify --update in your AI assistant.")
             if not (
                 os.environ.get("GEMINI_API_KEY")
                 or os.environ.get("GOOGLE_API_KEY")
                 or os.environ.get("MOONSHOT_API_KEY")
+                or os.environ.get("DEEPSEEK_API_KEY")
                 or os.environ.get("GRAPHIFY_NO_TIPS")
             ):
                 print("Tip: set GEMINI_API_KEY or GOOGLE_API_KEY to use Gemini for semantic extraction.")
@@ -2160,6 +2327,8 @@ def main() -> None:
         from graphify.build import build_from_json as _bfj
 
         _raw = json.loads(graph_path.read_text(encoding="utf-8"))
+        if "links" not in _raw and "edges" in _raw:
+            _raw = dict(_raw, links=_raw["edges"])
         try:
             G = _jg.node_link_graph(_raw, edges="links")
         except TypeError:
@@ -2328,7 +2497,7 @@ def main() -> None:
         # has an API key set.
         if len(sys.argv) < 3:
             print(
-                "Usage: graphify extract <path> [--backend gemini|kimi|claude|openai|ollama] "
+                "Usage: graphify extract <path> [--backend gemini|kimi|claude|openai|deepseek|ollama] "
                 "[--model M] [--out DIR] [--google-workspace] [--no-cluster] "
                 "[--max-workers N] [--token-budget N] [--max-concurrency N] "
                 "[--api-timeout S]",
@@ -2354,6 +2523,10 @@ def main() -> None:
         cli_token_budget: int | None = None
         cli_max_concurrency: int | None = None
         cli_api_timeout: float | None = None
+        # Clustering tuning knobs
+        cli_resolution: float = 1.0
+        cli_exclude_hubs: float | None = None
+        cli_excludes: list[str] = []
 
         def _parse_int(name: str, raw: str) -> int:
             try:
@@ -2419,6 +2592,18 @@ def main() -> None:
                 cli_api_timeout = _parse_float("--api-timeout", args[i + 1]); i += 2
             elif a.startswith("--api-timeout="):
                 cli_api_timeout = _parse_float("--api-timeout", a.split("=", 1)[1]); i += 1
+            elif a == "--resolution" and i + 1 < len(args):
+                cli_resolution = _parse_float("--resolution", args[i + 1]); i += 2
+            elif a.startswith("--resolution="):
+                cli_resolution = _parse_float("--resolution", a.split("=", 1)[1]); i += 1
+            elif a == "--exclude-hubs" and i + 1 < len(args):
+                cli_exclude_hubs = float(args[i + 1]); i += 2
+            elif a.startswith("--exclude-hubs="):
+                cli_exclude_hubs = float(a.split("=", 1)[1]); i += 1
+            elif a == "--exclude" and i + 1 < len(args):
+                cli_excludes.append(args[i + 1]); i += 2
+            elif a.startswith("--exclude="):
+                cli_excludes.append(a.split("=", 1)[1]); i += 1
             else:
                 i += 1
 
@@ -2447,7 +2632,8 @@ def main() -> None:
                 print(
                     "error: no LLM API key found. Set GEMINI_API_KEY or GOOGLE_API_KEY "
                     "(gemini), MOONSHOT_API_KEY (kimi), ANTHROPIC_API_KEY (claude), "
-                    "or OPENAI_API_KEY (openai), or pass --backend.",
+                    "OPENAI_API_KEY (openai), DEEPSEEK_API_KEY (deepseek), "
+                    "or pass --backend.",
                     file=sys.stderr,
                 )
                 sys.exit(1)
@@ -2478,6 +2664,23 @@ def main() -> None:
                     host in ("localhost", "127.0.0.1", "::1")
                     or host.startswith("127.")
                 )
+            elif backend == "bedrock":
+                allow_no_key = bool(
+                    os.environ.get("AWS_PROFILE")
+                    or os.environ.get("AWS_REGION")
+                    or os.environ.get("AWS_DEFAULT_REGION")
+                    or os.environ.get("AWS_ACCESS_KEY_ID")
+                )
+            elif backend == "claude-cli":
+                import shutil as _shutil
+                allow_no_key = _shutil.which("claude") is not None
+                if not allow_no_key:
+                    print(
+                        "error: backend 'claude-cli' requires the `claude` CLI on $PATH "
+                        "(install Claude Code and run `claude` once to authenticate).",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
             if not allow_no_key:
                 print(
                     f"error: backend '{backend}' requires {_format_backend_env_keys(backend)} to be set.",
@@ -2507,10 +2710,11 @@ def main() -> None:
                 target,
                 manifest_path=str(manifest_path),
                 google_workspace=google_workspace or None,
+                extra_excludes=cli_excludes or None,
             )
         else:
             print(f"[graphify extract] scanning {target}")
-            detection = _detect(target, google_workspace=google_workspace or None)
+            detection = _detect(target, google_workspace=google_workspace or None, extra_excludes=cli_excludes or None)
 
         files_by_type = detection.get("files", {})
         if incremental_mode:
@@ -2664,9 +2868,27 @@ def main() -> None:
         graph_json_path = graphify_out / "graph.json"
         analysis_path = graphify_out / ".graphify_analysis.json"
 
+        # Build a manifest-safe files dict: only stamp semantic_hash for files
+        # that actually produced output (cache hit or fresh extraction). Files
+        # whose chunk failed have no source_file entry in sem_result — leaving
+        # their semantic_hash empty so detect_incremental re-queues them (#933).
+        _sem_extracted: set[str] = {
+            n.get("source_file", "") for n in sem_result.get("nodes", [])
+        } | {
+            e.get("source_file", "") for e in sem_result.get("edges", [])
+        }
+        _sem_extracted.discard("")
+        _sem_types = {"document", "paper", "image"}
+        _manifest_files = {
+            ftype: [f for f in flist if ftype not in _sem_types or f in _sem_extracted]
+            for ftype, flist in files_by_type.items()
+        }
+
         if no_cluster:
             # --no-cluster: dump the raw merged extraction as graph.json.
             # No NetworkX, no community detection, no analysis sidecar.
+            from graphify.export import backup_if_protected as _backup
+            _backup(graphify_out)
             graph_json_path.write_text(
                 json.dumps(merged, indent=2), encoding="utf-8"
             )
@@ -2686,7 +2908,7 @@ def main() -> None:
                     f"est. cost: ${cost:.4f}"
                 )
             try:
-                _save_manifest(files_by_type, manifest_path=str(manifest_path))
+                _save_manifest(_manifest_files, manifest_path=str(manifest_path), kind="both")
             except Exception as exc:
                 print(f"[graphify extract] warning: could not write manifest: {exc}", file=sys.stderr)
             if global_merge:
@@ -2720,9 +2942,10 @@ def main() -> None:
                 prune_sources=deleted_files or None,
                 dedup=True,
                 dedup_llm_backend=dedup_backend,
+                root=target,
             )
         else:
-            G = _build([merged], dedup=True, dedup_llm_backend=dedup_backend)
+            G = _build([merged], dedup=True, dedup_llm_backend=dedup_backend, root=target)
         if G.number_of_nodes() == 0:
             print(
                 "[graphify extract] graph is empty — extraction produced no nodes. "
@@ -2732,7 +2955,7 @@ def main() -> None:
             )
             sys.exit(1)
 
-        communities = _cluster(G)
+        communities = _cluster(G, resolution=cli_resolution, exclude_hubs_percentile=cli_exclude_hubs)
         cohesion = _score_all(G, communities)
         try:
             gods = _god_nodes(G)
@@ -2743,7 +2966,13 @@ def main() -> None:
         except Exception:
             surprises = []
 
+        from graphify.export import backup_if_protected as _backup
+        _backup(graphify_out)
         _to_json(G, communities, str(graph_json_path), force=True)
+        if merged.get("output_tokens", 0) > 0:
+            (graphify_out / ".graphify_semantic_marker").write_text(
+                json.dumps({"output_tokens": merged["output_tokens"]}), encoding="utf-8"
+            )
         if global_merge:
             from graphify.global_graph import global_add as _global_add
             _tag = global_repo_tag or target.name
@@ -2768,7 +2997,7 @@ def main() -> None:
         }
         analysis_path.write_text(json.dumps(analysis, indent=2), encoding="utf-8")
         try:
-            _save_manifest(files_by_type, manifest_path=str(manifest_path))
+            _save_manifest(_manifest_files, manifest_path=str(manifest_path), kind="both")
         except Exception as exc:
             print(f"[graphify extract] warning: could not write manifest: {exc}", file=sys.stderr)
 
@@ -2796,6 +3025,135 @@ def main() -> None:
                 f"est. cost (~{backend}): ${cost:.4f}"
             )
 
+    elif cmd == "cache-check":
+        # graphify cache-check <files_from> [--root <dir>]
+        # Reads file paths (one per line) from <files_from>, checks semantic cache.
+        # Writes:
+        #   graphify-out/.graphify_cached.json   — already-cached nodes/edges/hyperedges
+        #   graphify-out/.graphify_uncached.txt  — paths that need extraction
+        # Stdout: "Cache: N hit, M miss"
+        from graphify.cache import check_semantic_cache
+        if len(sys.argv) < 3:
+            print("Usage: graphify cache-check <files_from> [--root <dir>]", file=sys.stderr)
+            sys.exit(1)
+        files_from = Path(sys.argv[2])
+        root = Path(".")
+        i = 3
+        while i < len(sys.argv):
+            if sys.argv[i] == "--root" and i + 1 < len(sys.argv):
+                root = Path(sys.argv[i + 1])
+                i += 2
+            else:
+                i += 1
+        files = [f for f in files_from.read_text(encoding="utf-8").splitlines() if f.strip()]
+        cached_nodes, cached_edges, cached_hyperedges, uncached = check_semantic_cache(files, root)
+        out = root / "graphify-out"
+        out.mkdir(parents=True, exist_ok=True)
+        if cached_nodes or cached_edges or cached_hyperedges:
+            (out / ".graphify_cached.json").write_text(
+                json.dumps({"nodes": cached_nodes, "edges": cached_edges, "hyperedges": cached_hyperedges},
+                           ensure_ascii=False),
+                encoding="utf-8",
+            )
+        (out / ".graphify_uncached.txt").write_text("\n".join(uncached), encoding="utf-8")
+        print(f"Cache: {len(files) - len(uncached)} hit, {len(uncached)} miss")
+
+    elif cmd == "merge-chunks":
+        # graphify merge-chunks <chunk_glob_or_files...> --out <path>
+        # Concatenates .graphify_chunk_*.json files written by semantic subagents.
+        # Deduplicates nodes by id (first writer wins). Sums token counts.
+        import glob as _glob
+        if len(sys.argv) < 3:
+            print("Usage: graphify merge-chunks <chunk_files...> --out <path>", file=sys.stderr)
+            sys.exit(1)
+        out_path: Path | None = None
+        chunk_args: list[str] = []
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == "--out" and i + 1 < len(sys.argv):
+                out_path = Path(sys.argv[i + 1])
+                i += 2
+            else:
+                chunk_args.append(sys.argv[i])
+                i += 1
+        if not out_path:
+            print("error: --out <path> required", file=sys.stderr)
+            sys.exit(1)
+        chunk_files: list[str] = []
+        for arg in chunk_args:
+            expanded = _glob.glob(arg)
+            chunk_files.extend(sorted(expanded) if expanded else [arg])
+        merged: dict = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0}
+        seen_ids: set[str] = set()
+        for cf in chunk_files:
+            try:
+                chunk = json.loads(Path(cf).read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                print(f"[graphify merge-chunks] warning: skipping {cf}: {exc}", file=sys.stderr)
+                continue
+            for n in chunk.get("nodes", []):
+                if n.get("id") not in seen_ids:
+                    seen_ids.add(n["id"])
+                    merged["nodes"].append(n)
+            merged["edges"].extend(chunk.get("edges", []))
+            merged["hyperedges"].extend(chunk.get("hyperedges", []))
+            merged["input_tokens"] += chunk.get("input_tokens", 0)
+            merged["output_tokens"] += chunk.get("output_tokens", 0)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
+        print(
+            f"Merged {len(chunk_files)} chunks: {merged['nodes']} nodes, {len(merged['edges'])} edges, "
+            f"{merged['input_tokens']:,} in / {merged['output_tokens']:,} out tokens"
+        )
+
+    elif cmd == "merge-semantic":
+        # graphify merge-semantic --cached <path> --new <path> --out <path>
+        # Merges cached semantic results with freshly-extracted chunk results.
+        # Deduplicates nodes by id (cached entries take priority over new ones).
+        if len(sys.argv) < 3:
+            print("Usage: graphify merge-semantic --cached <path> --new <path> --out <path>", file=sys.stderr)
+            sys.exit(1)
+        cached_path: Path | None = None
+        new_path: Path | None = None
+        out_path2: Path | None = None
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == "--cached" and i + 1 < len(sys.argv):
+                cached_path = Path(sys.argv[i + 1]); i += 2
+            elif sys.argv[i] == "--new" and i + 1 < len(sys.argv):
+                new_path = Path(sys.argv[i + 1]); i += 2
+            elif sys.argv[i] == "--out" and i + 1 < len(sys.argv):
+                out_path2 = Path(sys.argv[i + 1]); i += 2
+            else:
+                i += 1
+        if not out_path2:
+            print("error: --out <path> required", file=sys.stderr)
+            sys.exit(1)
+        empty: dict = {"nodes": [], "edges": [], "hyperedges": []}
+        cached_data = json.loads(cached_path.read_text(encoding="utf-8")) if cached_path and cached_path.exists() else empty
+        new_data = json.loads(new_path.read_text(encoding="utf-8")) if new_path and new_path.exists() else empty
+        seen_ids2: set[str] = set()
+        all_nodes: list[dict] = []
+        for n in cached_data.get("nodes", []) + new_data.get("nodes", []):
+            if n.get("id") not in seen_ids2:
+                seen_ids2.add(n["id"])
+                all_nodes.append(n)
+        merged2 = {
+            "nodes": all_nodes,
+            "edges": cached_data.get("edges", []) + new_data.get("edges", []),
+            "hyperedges": cached_data.get("hyperedges", []) + new_data.get("hyperedges", []),
+        }
+        out_path2.parent.mkdir(parents=True, exist_ok=True)
+        out_path2.write_text(json.dumps(merged2, ensure_ascii=False), encoding="utf-8")
+        print(f"Merged: {len(merged2['nodes'])} nodes, {len(merged2['edges'])} edges")
+
+    elif Path(cmd).exists() or cmd in (".", "..") or cmd.startswith(("./", "../", "/", "~")):
+        # User ran `graphify <path>` directly — treat as `graphify extract <path>`.
+        # Common when following the PowerShell note in README (`graphify .`) or
+        # copy-pasting skill invocations without the leading slash.
+        sys.argv.insert(2, sys.argv[1])
+        sys.argv[1] = "extract"
+        main()
     else:
         print(f"error: unknown command '{cmd}'", file=sys.stderr)
         print("Run 'graphify --help' for usage.", file=sys.stderr)

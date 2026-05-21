@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "graphifyy"
-version = "0.7.13"
+version = "0.8.14"
 description = "AI coding assistant skill (Claude Code, Codex, OpenCode, Cursor, Gemini CLI, Aider, OpenClaw, Factory Droid, Trae, Hermes, Kiro, Pi, Google Antigravity) - turn any folder of code, docs, papers, images, or videos into a queryable knowledge graph"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -38,6 +38,8 @@ dependencies = [
     "tree-sitter-julia",
     "tree-sitter-verilog",
     "tree-sitter-fortran",
+    "tree-sitter-bash",
+    "tree-sitter-json",
 ]
 
 [project.urls]
@@ -78,5 +80,22 @@ include-package-data = true
 [tool.setuptools.package-data]
 graphify = ["skill.md", "skill-codex.md", "skill-opencode.md", "skill-aider.md", "skill-copilot.md", "skill-claw.md", "skill-windows.md", "skill-droid.md", "skill-trae.md", "skill-kiro.md", "skill-vscode.md", "skill-pi.md", "skill-omp.md", "omp-extension/index.ts", "omp-extension/package.json"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [
+    "graphify-benchmark", "graphify_eval", "graphify_test",
+    "worked", "llm-stack-corpus", "llm-stack-demo", "product-site",
+    "scripts", "ebook", ".github", "dist", "build",
+]
+
 [tool.bandit]
 skips = ["B404"]
+
+[dependency-groups]
+dev = [
+    "build>=1.5.0",
+    "nuitka>=4.1",
+    "patchelf>=0.17.2.4 ; sys_platform != 'win32'",
+    "setuptools>=82.0.1",
+    "wheel>=0.47.0",
+]

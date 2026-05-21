@@ -149,6 +149,30 @@ def test_cpp_import_edges_have_import_context():
     assert all(e.get("context") == "import" for e in import_edges)
 
 
+def test_cpp_class_inherits_edge():
+    """Regression for #915: `class Derived : public Base {}` should emit an inherits edge."""
+    r = extract_cpp(FIXTURES / "sample.cpp")
+    node_by_id = {n["id"]: n["label"] for n in r["nodes"]}
+    found = any(
+        "AuthedHttpClient" in node_by_id.get(e["source"], "")
+        and "HttpClient" in node_by_id.get(e["target"], "")
+        for e in r["edges"] if e["relation"] == "inherits"
+    )
+    assert found, "AuthedHttpClient should have inherits edge to HttpClient"
+
+
+def test_cpp_struct_inherits_edge():
+    """Structs use the same `: Base` syntax as classes and must also emit inherits."""
+    r = extract_cpp(FIXTURES / "sample.cpp")
+    node_by_id = {n["id"]: n["label"] for n in r["nodes"]}
+    found = any(
+        "RetryingHttpClient" in node_by_id.get(e["source"], "")
+        and "HttpClient" in node_by_id.get(e["target"], "")
+        for e in r["edges"] if e["relation"] == "inherits"
+    )
+    assert found, "RetryingHttpClient (struct) should have inherits edge to HttpClient"
+
+
 # ── Ruby ─────────────────────────────────────────────────────────────────────
 
 def test_ruby_no_error():
@@ -784,7 +808,7 @@ def test_fortran_no_dangling_edges():
 
 
 def test_fortran_capital_F_parses_preprocessed():
-    r = extract_fortran(FIXTURES / "sample.F90")
+    r = extract_fortran(FIXTURES / "sample_preprocessed.F90")
     assert "error" not in r
     labels = [n["label"] for n in r["nodes"]]
     assert "shapes" in labels
