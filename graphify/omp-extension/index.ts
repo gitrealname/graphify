@@ -94,6 +94,7 @@ Hyperedges: if 3+ nodes share a concept or flow not captured by pairwise edges, 
 DEEP MODE: be aggressive with INFERRED edges. Pursue every reasonable inference. Add semantically_similar_to edges for concepts that solve the same problem even if only loosely related. Prefer more edges over fewer.` : ""}
 
 Node ID format: lowercase, only [a-z0-9_]. Format: {stem}_{entity} where stem = filename stem, entity = symbol name (both normalised).
+IMPORTANT: file_type must be exactly one of: code, document, paper, image, rationale. Never use a file path as file_type.
 
 Output exactly this schema:
 {"nodes":[{"id":"stem_entity","label":"Human Readable Name","file_type":"code|document|paper|image|rationale","source_file":"relative/path","source_location":null,"source_url":null,"captured_at":null,"author":null,"contributor":null}],"edges":[{"source":"node_id","target":"node_id","relation":"calls|implements|references|cites|conceptually_related_to|shares_data_with|semantically_similar_to|rationale_for","confidence":"EXTRACTED|INFERRED|AMBIGUOUS","confidence_score":1.0,"source_file":"relative/path","source_location":null,"weight":1.0}],"hyperedges":[{"id":"snake_case_id","label":"Human Readable Label","nodes":["node_id1","node_id2","node_id3"],"relation":"participate_in|implement|form","confidence":"EXTRACTED|INFERRED","confidence_score":0.75,"source_file":"relative/path"}],"input_tokens":0,"output_tokens":0}`;
@@ -406,8 +407,9 @@ async function labelCommunities(pi: any, ctx: any, targetPath: string): Promise<
     logger.debug(`[DBG graphify] labelCommunities: saved ${Object.keys(allLabels).length} labels (${toLabel.length} new)`);
 
     // Re-run cluster-only so GRAPH_REPORT.md picks up the labels
-    Bun.spawnSync([detectPython(), "-m", "graphify", "cluster-only", targetPath], { cwd: process.cwd() });
-    logger.debug("[DBG graphify] labelCommunities: cluster-only re-run with labels");
+    const clusterProc2 = Bun.spawnSync([detectPython(), "-m", "graphify", "cluster-only", targetPath], { cwd: process.cwd() });
+    const clusterStderr2 = new TextDecoder("utf-8").decode(clusterProc2.stderr).trim();
+    logger.debug(`[DBG graphify] labelCommunities: cluster-only re-run exit=${clusterProc2.exitCode}${clusterStderr2 ? " stderr=" + clusterStderr2.slice(0, 150) : ""}`);
 }
 
 // ── extension factory ─────────────────────────────────────────────────────────
@@ -484,7 +486,8 @@ export default function (pi: any): void {
             // cluster-only: label and re-run cluster-only.
             if (argv[0] === "extract" || argv[0] === "add") {
                 const proc = Bun.spawnSync([detectPython(), "-m", "graphify", "cluster-only", argv[1] ?? "."], { cwd: process.cwd() });
-                logger.debug(`[DBG graphify] cluster-only exit=${proc.exitCode}`);
+                const clusterStderr = new TextDecoder("utf-8").decode(proc.stderr).trim();
+                logger.debug(`[DBG graphify] cluster-only exit=${proc.exitCode}${clusterStderr ? " stderr=" + clusterStderr.slice(0, 150) : ""}`);
                 await labelCommunities(pi, ctx, argv[1] ?? ".");
             } else if (argv[0] === "cluster-only") {
                 await labelCommunities(pi, ctx, argv[1] ?? ".");
