@@ -221,7 +221,7 @@ async function anthropicProxyServer(pi: any, ctx: any, deepMode: boolean): Promi
 
 async function runGraphify(pi: any, argv: string[], ctx: any, hasBackend: boolean): Promise<{ output: string; chunkCount: number }> {
     const logger = pi.pi.logger;
-    const env = { ...process.env } as Record<string, string>;
+    const env = { ...process.env, PYTHONUTF8: "1" } as Record<string, string>;
     delete env.GEMINI_API_KEY;
     delete env.GOOGLE_API_KEY;
 
@@ -279,8 +279,8 @@ async function runGraphify(pi: any, argv: string[], ctx: any, hasBackend: boolea
     logger.debug(`[DBG graphify] exit=${exitCode} chunks=${chunkCount} stdoutLen=${stdout.trim().length} stderrLen=${stderr.trim().length}`);
 
     const parts: string[] = [];
-    if (stdout.trim()) parts.push(stdout.trimEnd());
-    if (exitCode !== 0 && stderr.trim()) parts.push(stderr.trimEnd());
+    if (stdout.trim()) parts.push(stdout.trim());
+    if (exitCode !== 0 && stderr.trim()) parts.push(stderr.trim());
     return { output: parts.join("\n"), chunkCount };
 }
 
@@ -304,8 +304,9 @@ function summarizeReport(report: string): string {
 }
 
 function isSearchOrFind(event: any): boolean {
-    const name = event.toolName;
-    if (name === "search" || name === "find") return true;
+    const name: string = event.toolName ?? "";
+    // OMP tool names that indicate the LLM is exploring the codebase
+    if (["search", "find", "ast_grep", "lsp"].includes(name)) return true;
     if (name === "bash") {
         const cmd: string = (event.input as { command?: string }).command ?? "";
         return /grep|rg|ripgrep|find |fd /.test(cmd);
@@ -419,6 +420,17 @@ export default function (pi: any): void {
 
     pi.on("session_start", () => {
         remindedThisSession = false;
+        if (graphExists()) {
+            const summary = summarizeReport(readGraphReport() ?? "");
+            const text = summary
+                ? `[graphify] ${summary} — invoke /skill:graphify, then use /graphify query, path, or explain`
+                : `[graphify] graph ready — invoke /skill:graphify, then use /graphify query, path, or explain`;
+            pi.sendMessage(
+                { customType: "graphify:hint", content: [{ type: "text", text: text }], display: true },
+                { deliverAs: "steer" },
+            );
+            remindedThisSession = true;
+        }
     });
 
     pi.on("tool_result", (event: any): void => {
@@ -427,19 +439,12 @@ export default function (pi: any): void {
         if (!graphExists()) return;
 
         remindedThisSession = true;
-        const report = readGraphReport();
-        const summary = report ? summarizeReport(report) : "";
-        const visibleText = summary ? `[graphify] ${summary}` : `[graphify] graph ready`;
+        const summary = summarizeReport(readGraphReport() ?? "");
+        const visibleText = summary ? `[graphify] ${summary}` : `[graphify] graph ready — use /graphify query`;
         pi.sendMessage(
             { customType: "graphify:hint", content: [{ type: "text", text: visibleText }], display: true },
             { deliverAs: "steer" },
         );
-        if (report) {
-            pi.sendMessage(
-                { customType: "graphify:context", content: [{ type: "text", text: `${report}\n\nThe above graph report has been loaded into context. Do not narrate this. Do not output anything. Wait for the user's question.` }], display: false },
-                { deliverAs: "steer" },
-            );
-        }
     });
 
     pi.registerCommand("graphify", {
@@ -447,12 +452,22 @@ export default function (pi: any): void {
             "Knowledge graph for this project. Usage: /graphify [query|path|explain|extract|update|...] [args]",
         getArgumentCompletions(prefix: string): AutocompleteItem[] {
             const TOP = [
-                "query", "path", "explain",
-                "extract", "update", "cluster-only",
-                "add", "watch", "check-update",
-                "export", "global", "prs",
-                "clone", "merge-graphs",
-                "hook", "tree", "dedup", "--help", "--version",
+                // Core queries
+                "query", "path", "explain", "save-result",
+                // Build / extract
+                "extract", "update", "cluster-only", "add",
+                // Watch / hooks
+                "watch", "hook",
+                // Export subcommands
+                "export callflow-html", "export wiki", "export svg",
+                "export graphml", "export neo4j", "export obsidian", "export html",
+                // Global graph subcommands
+                "global list", "global add", "global remove", "global path",
+                // Multi-repo / PR
+                "clone", "merge-graphs", "prs",
+                // Utility
+                "check-update", "tree",
+                "--help", "--version",
             ];
             return TOP.filter((s) => s.startsWith(prefix)).map((s) => ({ label: s, value: s }));
         },
@@ -464,10 +479,21 @@ export default function (pi: any): void {
                 const raw = args.trim() ? shellSplit(args.trim()) : [];
                 const cmd = raw[0] === "update" ? "extract" : raw[0];
                 const rest = raw[0] === "update" ? raw.slice(1) : raw.slice(1);
+                const flags = rest.filter((a: string) => a.startsWith("-"));
+                const positional = rest.filter((a: string) => !a.startsWith("-"));
+
                 const needsPath = ["extract", "update", "cluster-only", "query", "path", "explain"].includes(cmd);
-                const hasPath = rest.length > 0 && !rest[0].startsWith("-");
-                const finalRest = needsPath && !hasPath ? [".", ...rest] : rest;
-                return cmd ? [cmd, ...finalRest] : raw;
+                const hasPath = positional.length > 0;
+                const baseRest = needsPath && !hasPath ? [".", ...rest] : rest;
+
+                // explain / query: join all positional args as one search string — no quoting required
+                if ((cmd === "explain" || cmd === "query" || cmd === "save-result") && positional.length > 1) {
+                    return [cmd, positional.join(" "), ...flags];
+                }
+                // path: needs exactly two positional args (source, target)
+                // path needs exactly two quoted args — can't auto-fix multi-word without knowing split point
+
+                return cmd ? [cmd, ...baseRest] : raw;
             })();
             const hasBackend = argv.some((a: string) => a === "--backend" || a.startsWith("--backend="));
 
@@ -501,25 +527,24 @@ export default function (pi: any): void {
 
             const isExtractionCmd = argv[0] === "extract" || argv[0] === "update" || argv[0] === "add";
             if (isExtractionCmd) {
-                const report = readGraphReport();
-                if (report) {
-                    const summary = summarizeReport(report);
-                    if (summary) {
-                        const chunks = ` · ${chunkCount} chunk${chunkCount !== 1 ? "s" : ""} extracted`;
-                        pi.sendMessage(
-                            { customType: "graphify:hint", content: [{ type: "text", text: `[graphify] ${summary}${chunks}` }], display: true },
-                            { deliverAs: "steer" },
-                        );
-                    }
+                const summary = summarizeReport(readGraphReport() ?? "");
+                if (summary) {
+                    const chunks = ` · ${chunkCount} chunk${chunkCount !== 1 ? "s" : ""} extracted`;
                     pi.sendMessage(
-                        { customType: "graphify:context", content: [{ type: "text", text:
-                            `${report}\n\nGraph updated. Do not narrate this. Do not output anything. Wait for the user's question.` }], display: false },
+                        { customType: "graphify:hint", content: [{ type: "text", text: `[graphify] ${summary}${chunks}` }], display: true },
                         { deliverAs: "steer" },
                     );
                 }
             } else if (out.trim()) {
                 pi.sendMessage(
                     { customType: "graphify:output", content: [{ type: "text", text: out }], display: true },
+                    { deliverAs: "steer", triggerTurn: true },
+                );
+            } else {
+                // Command ran but produced no output — tell the user
+                const fallback = `[graphify] no output for: graphify ${argv.join(" ")}`;
+                pi.sendMessage(
+                    { customType: "graphify:output", content: [{ type: "text", text: fallback }], display: true },
                     { deliverAs: "steer" },
                 );
             }
