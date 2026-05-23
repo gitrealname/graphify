@@ -354,6 +354,7 @@ async function labelCommunities(pi: any, ctx: any, targetPath: string): Promise<
     const logger = piModule.logger;
     const completeSimple = piModule.completeSimple;
     if (!completeSimple || !ctx.model) return;
+    const labelModel = ctx.smolModel ?? ctx.model; // community naming is cheap — use smol
 
     // Write script to temp file — avoids Windows arg-length limits with -c
     const tmpScript = require("node:os").tmpdir() + "/graphify_samples.py";
@@ -391,7 +392,7 @@ async function labelCommunities(pi: any, ctx: any, targetPath: string): Promise<
         const totalBatches = Math.ceil(sampleLines.length / BATCH);
         logger.debug(`[DBG graphify] labelCommunities: batch ${batchNum}/${totalBatches} (${sampleLines.slice(i, i+BATCH).length} communities)`);
 
-        const result = await completeSimple(ctx.model, {
+        const result = await completeSimple(labelModel, {
             systemPrompt: ["Name each community in 2-5 descriptive words based on its members. Output ONLY valid JSON: {\"0\": \"Name\", \"1\": \"Name\", ...}. No explanation, no markdown fences."],
             messages: [{ role: "user", content: [{ type: "text", text: `Communities to name:\n${batch}` }], timestamp: Date.now() }],
         }, { maxTokens: 4096 });
