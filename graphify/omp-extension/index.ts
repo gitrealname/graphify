@@ -219,7 +219,7 @@ async function anthropicProxyServer(pi: any, ctx: any, deepMode: boolean): Promi
 
 // ── subprocess helper ─────────────────────────────────────────────────────────
 
-async function runGraphify(pi: any, argv: string[], ctx: any, hasBackend: boolean): Promise<{ output: string; chunkCount: number }> {
+async function runGraphify(pi: any, argv: string[], ctx: any, hasBackend: boolean, signal?: AbortSignal): Promise<{ output: string; chunkCount: number }> {
     const logger = pi.pi.logger;
     const env = { ...process.env, PYTHONUTF8: "1" } as Record<string, string>;
     delete env.GEMINI_API_KEY;
@@ -269,11 +269,21 @@ async function runGraphify(pi: any, argv: string[], ctx: any, hasBackend: boolea
         stderr: "pipe",
     });
 
+    // Wire ESC/abort: kill the subprocess and stop the proxy when the turn is cancelled.
+    const onAbort = () => {
+        logger.debug("[DBG graphify] aborted — killing subprocess");
+        proc.kill();
+        proxy?.stop();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+
     const [stdout, stderr, exitCode] = await Promise.all([
         new Response(proc.stdout).text(),
         new Response(proc.stderr).text(),
         proc.exited,
     ]);
+
+    signal?.removeEventListener("abort", onAbort);
 
     const chunkCount = proxy?.stop() ?? 0;
     logger.debug(`[DBG graphify] exit=${exitCode} chunks=${chunkCount} stdoutLen=${stdout.trim().length} stderrLen=${stderr.trim().length}`);
@@ -478,7 +488,7 @@ export default function (pi: any): void {
             const argv = (() => {
                 const raw = args.trim() ? shellSplit(args.trim()) : [];
                 const cmd = raw[0] === "update" ? "extract" : raw[0];
-                const rest = raw[0] === "update" ? raw.slice(1) : raw.slice(1);
+                const rest = raw.slice(1);
                 const flags = rest.filter((a: string) => a.startsWith("-"));
                 const positional = rest.filter((a: string) => !a.startsWith("-"));
 
@@ -502,11 +512,11 @@ export default function (pi: any): void {
             let out = "";
             let chunkCount = 0;
             try {
-                ({ output: out, chunkCount } = await runGraphify(pi, argv, ctx, hasBackend));
+                ({ output: out, chunkCount } = await runGraphify(pi, argv, ctx, hasBackend, ctx.signal));
                 // add: chain extract so the new file is immediately indexed.
                 if (argv[0] === "add" && !out.startsWith("error")) {
                     logger.debug("[DBG graphify] add complete — chaining extract .");
-                    const extractResult = await runGraphify(pi, ["extract", "."], ctx, hasBackend);
+                    const extractResult = await runGraphify(pi, ["extract", "."], ctx, hasBackend, ctx.signal);
                     chunkCount += extractResult.chunkCount;
                     out = extractResult.output || out;
                 }
