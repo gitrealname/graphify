@@ -451,7 +451,7 @@ function _elapsed(startedAt: number): string {
 }
 
 function _fmtHint(title: string, body?: string): string {
-    return body ? `### ${title}\n${body}` : `### ${title}`;
+    return body ? `## ${title}\n${body}` : `## ${title}`;
 }
 
 function _progressHint(): string {
@@ -464,7 +464,7 @@ function _progressHint(): string {
     };
     // derive actual stage: if proxy exists but no chunks yet, still in AST phase
     const displayStage = (_running.stage === "semantic" && cnt.total === 0) ? "ast" : _running.stage;
-    const title = `⚙ graphify — ${stageLabel[displayStage]} (PID: ${_running.pid})`;
+    const title = `⚙  ${stageLabel[displayStage]} (PID: ${_running.pid})`;
     const body = `chunks \`${cnt.total}\`${active} · elapsed \`${_elapsed(_running.startedAt)}\` · target \`${_running.target}\``;
     return _fmtHint(title, body);
 }
@@ -484,7 +484,7 @@ export default function (pi: any): void {
                     ? `${summary}\ninvoke \`/skill:graphify\`, then use \`/graphify query\`, \`path\`, or \`explain\``
                     : `invoke \`/skill:graphify\`, then use \`/graphify query\`, \`path\`, or \`explain\``;
                 pi.sendMessage(
-                    { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("🔍 graphify — graph ready", body) }], display: true },
+                    { customType: "graphify", content: [{ type: "text", text: _fmtHint("🔍 graph ready", body) }], display: true },
                     { deliverAs: "steer" },
                 );
                 remindedThisSession = true;
@@ -500,7 +500,7 @@ export default function (pi: any): void {
             const summary = summarizeReport(readGraphReport() ?? "");
             const body = summary ?? "use `/graphify query`, `path`, or `explain`";
             pi.sendMessage(
-                { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("🔍 graphify — graph ready", body) }], display: true },
+                { customType: "graphify", content: [{ type: "text", text: _fmtHint("🔍 graph ready", body) }], display: true },
                 { deliverAs: "steer" },
             );
         });
@@ -510,7 +510,7 @@ export default function (pi: any): void {
     pi.on("agent_end", (): void => {
         if (!_running) return;
         pi.sendMessage(
-            { customType: "graphify:hint", content: [{ type: "text", text: _progressHint() }], display: true },
+            { customType: "graphify", content: [{ type: "text", text: _progressHint() }], display: true },
             { deliverAs: "nextTurn" },
         );
     });
@@ -578,7 +578,7 @@ export default function (pi: any): void {
             // ── /graphify (no args) → status hint if running ─────────────────
             if (argv.length === 0 && _running) {
                 pi.sendMessage(
-                    { customType: "graphify:hint", content: [{ type: "text", text: _progressHint() }], display: true },
+                    { customType: "graphify", content: [{ type: "text", text: _progressHint() }], display: true },
                     { deliverAs: "nextTurn" },
                 );
                 return;
@@ -588,7 +588,7 @@ export default function (pi: any): void {
             if (argv[0] === "kill") {
                 if (!_running) {
                 pi.sendMessage(
-                    { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("graphify", "no extraction running") }], display: true },
+                    { customType: "graphify", content: [{ type: "text", text: _fmtHint("graphify", "no extraction running") }], display: true },
                     { deliverAs: "nextTurn" },
                 );
                     return;
@@ -599,7 +599,7 @@ export default function (pi: any): void {
                 _running = null;
                 logger.debug(`[DBG graphify] killed background process pid=${pid}`);
                 pi.sendMessage(
-                    { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint(`🛑 graphify — stopped (PID: ${pid})`) }], display: true },
+                    { customType: "graphify", content: [{ type: "text", text: _fmtHint(`🛑 stopped (PID: ${pid})`) }], display: true },
                     { deliverAs: "nextTurn" },
                 );
                 return;
@@ -609,7 +609,7 @@ export default function (pi: any): void {
             const BG_BLOCKED = ["extract", "add", "cluster-only"];
             if (_running && BG_BLOCKED.includes(argv[0])) {
                 pi.sendMessage(
-                    { customType: "graphify:hint", content: [{ type: "text", text: `${_progressHint()}\nuse \`/graphify kill\` to stop` }], display: true },
+                    { customType: "graphify", content: [{ type: "text", text: `${_progressHint()}\nuse \`/graphify kill\` to stop` }], display: true },
                     { deliverAs: "nextTurn" },
                 );
                 return;
@@ -627,7 +627,7 @@ export default function (pi: any): void {
                             if (!_running) return;
                             _running.stage = "semantic";
                             pi.sendMessage(
-                                { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint(`⚙ graphify — extracting (PID: ${_running.pid})`, `elapsed \`${_elapsed(_running.startedAt)}\` · target \`${target}\``) }], display: true },
+                                { customType: "graphify", content: [{ type: "text", text: _fmtHint(`⚙  extracting (PID: ${_running.pid})`, `elapsed \`${_elapsed(_running.startedAt)}\` · target \`${target}\``) }], display: true },
                                 { deliverAs: "nextTurn" },
                             );
                         });
@@ -635,7 +635,7 @@ export default function (pi: any): void {
                     } catch (err) {
                         logger.debug(`[DBG graphify bg] proxy start failed: ${err}`);
                         pi.sendMessage(
-                            { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("⚠ graphify — proxy failed", `semantic extraction unavailable · running AST-only\n\`${err}\``) }], display: true },
+                            { customType: "graphify", content: [{ type: "text", text: _fmtHint("⚠ proxy failed", `semantic extraction unavailable · running AST-only\n\`${err}\``) }], display: true },
                             { deliverAs: "nextTurn" },
                         );
                     }
@@ -656,7 +656,7 @@ export default function (pi: any): void {
                     proxy?.stop();
                     _running = null;
                     pi.sendMessage(
-                        { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("❌ graphify — spawn failed", `\`${err}\``) }], display: true },
+                        { customType: "graphify", content: [{ type: "text", text: _fmtHint("❌ spawn failed", `\`${err}\``) }], display: true },
                         { deliverAs: "nextTurn" },
                     );
                     return;
@@ -665,7 +665,7 @@ export default function (pi: any): void {
                 _running = { proc, pid: proc.pid, stage: "ast", target, startedAt: Date.now(), proxy };
                 logger.debug(`[DBG graphify bg] started pid=${proc.pid}`);
                 pi.sendMessage(
-                    { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint(`⚙ graphify — indexing AST (PID: ${proc.pid})`, `target \`${target}\``) }], display: true },
+                    { customType: "graphify", content: [{ type: "text", text: _fmtHint(`⚙  indexing AST (PID: ${proc.pid})`, `target \`${target}\``) }], display: true },
                     { deliverAs: "nextTurn" },
                 );
 
@@ -678,7 +678,7 @@ export default function (pi: any): void {
                         try {
                             _running.stage = "clustering";
                             pi.sendMessage(
-                                { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint(`⚙ graphify — clustering (PID: ${_running.pid})`, `elapsed \`${_elapsed(_running.startedAt)}\` · target \`${target}\``) }], display: true },
+                                { customType: "graphify", content: [{ type: "text", text: _fmtHint(`⚙  clustering (PID: ${_running.pid})`, `elapsed \`${_elapsed(_running.startedAt)}\` · target \`${target}\``) }], display: true },
                                 { deliverAs: "nextTurn" },
                             );
                             const clusterProc = Bun.spawnSync([detectPython(), "-m", "graphify", "cluster-only", target], { cwd: process.cwd() });
@@ -687,7 +687,7 @@ export default function (pi: any): void {
 
                             _running.stage = "labeling";
                             pi.sendMessage(
-                                { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint(`⚙ graphify — labeling (PID: ${_running.pid})`, `elapsed \`${_elapsed(_running.startedAt)}\` · target \`${target}\``) }], display: true },
+                                { customType: "graphify", content: [{ type: "text", text: _fmtHint(`⚙  labeling (PID: ${_running.pid})`, `elapsed \`${_elapsed(_running.startedAt)}\` · target \`${target}\``) }], display: true },
                                 { deliverAs: "nextTurn" },
                             );
                             await labelCommunities(pi, { model: capturedModel, smolModel: capturedSmolModel }, target);
@@ -698,7 +698,7 @@ export default function (pi: any): void {
                             const elapsed = _elapsed(_running.startedAt);
                             _running = null;
                             pi.sendMessage(
-                                { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("❌ graphify — post-process failed", `\`${err}\` · elapsed \`${elapsed}\``) }], display: true },
+                                { customType: "graphify", content: [{ type: "text", text: _fmtHint("❌ post-process failed", `\`${err}\` · elapsed \`${elapsed}\``) }], display: true },
                                 { deliverAs: "nextTurn" },
                             );
                             return;
@@ -712,13 +712,13 @@ export default function (pi: any): void {
                         const summary = summarizeReport(readGraphReport() ?? "");
                         _running = null;
                         pi.sendMessage(
-                            { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("✅ graphify — done", `${summary ?? "graph updated"} · chunks \`${chunksDone}\` · elapsed \`${elapsed}\``) }], display: true },
+                            { customType: "graphify", content: [{ type: "text", text: _fmtHint("✅ done", `${summary ?? "graph updated"} · chunks \`${chunksDone}\` · elapsed \`${elapsed}\``) }], display: true },
                             { deliverAs: "nextTurn" },
                         );
                     } else {
                         _running = null;
                         pi.sendMessage(
-                            { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("❌ graphify — failed", `exit \`${exitCode}\` · elapsed \`${elapsed}\``) }], display: true },
+                            { customType: "graphify", content: [{ type: "text", text: _fmtHint("❌ failed", `exit \`${exitCode}\` · elapsed \`${elapsed}\``) }], display: true },
                             { deliverAs: "nextTurn" },
                         );
                     }
@@ -727,7 +727,7 @@ export default function (pi: any): void {
                     proxy?.stop();
                     _running = null;
                     pi.sendMessage(
-                        { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("❌ graphify — process error", `\`${err}\``) }], display: true },
+                        { customType: "graphify", content: [{ type: "text", text: _fmtHint("❌ process error", `\`${err}\``) }], display: true },
                         { deliverAs: "nextTurn" },
                     );
                 });
@@ -750,7 +750,7 @@ export default function (pi: any): void {
                 }
                 if (addOut.startsWith("error")) {
                     pi.sendMessage(
-                        { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("❌ graphify — add failed", `\`${addOut}\``) }], display: true },
+                        { customType: "graphify", content: [{ type: "text", text: _fmtHint("❌ add failed", `\`${addOut}\``) }], display: true },
                         { deliverAs: "nextTurn" },
                     );
                     return;
@@ -793,20 +793,20 @@ export default function (pi: any): void {
                 if (summary) {
                     const chunks = ` · ${chunkCount} chunk${chunkCount !== 1 ? "s" : ""} extracted`;
                     pi.sendMessage(
-                        { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("✅ graphify — done", `${summary} · chunks \`${chunkCount}\``) }], display: true },
+                        { customType: "graphify", content: [{ type: "text", text: _fmtHint("✅ done", `${summary} · chunks \`${chunkCount}\``) }], display: true },
                         { deliverAs: "nextTurn" },
                     );
                 }
             } else if (out.trim()) {
                 pi.sendMessage(
-                    { customType: "graphify:output", content: [{ type: "text", text: out }], display: true },
+                    { customType: "graphify", content: [{ type: "text", text: out }], display: true },
                     { deliverAs: "steer", triggerTurn: true },
                 );
             } else {
                 // Command ran but produced no output — tell the user
                 const fallback = `[graphify] no output for: graphify ${argv.join(" ")}`;
                 pi.sendMessage(
-                    { customType: "graphify:output", content: [{ type: "text", text: fallback }], display: true },
+                    { customType: "graphify", content: [{ type: "text", text: fallback }], display: true },
                     { deliverAs: "steer" },
                 );
             }
