@@ -427,36 +427,39 @@ async function labelCommunities(pi: any, ctx: any, targetPath: string): Promise<
 // ── extension factory ─────────────────────────────────────────────────────────
 
 export default function (pi: any): void {
+    const onDemand = !!process.env.GRAPHIFY_ON_DEMAND;
     let remindedThisSession = false;
 
-    pi.on("session_start", () => {
-        remindedThisSession = false;
-        if (graphExists()) {
+    if (!onDemand) {
+        pi.on("session_start", () => {
+            remindedThisSession = false;
+            if (graphExists()) {
+                const summary = summarizeReport(readGraphReport() ?? "");
+                const text = summary
+                    ? `[graphify] ${summary} — invoke /skill:graphify, then use /graphify query, path, or explain`
+                    : `[graphify] graph ready — invoke /skill:graphify, then use /graphify query, path, or explain`;
+                pi.sendMessage(
+                    { customType: "graphify:hint", content: [{ type: "text", text: text }], display: true },
+                    { deliverAs: "steer" },
+                );
+                remindedThisSession = true;
+            }
+        });
+
+        pi.on("tool_result", (event: any): void => {
+            if (remindedThisSession) return;
+            if (!isSearchOrFind(event)) return;
+            if (!graphExists()) return;
+
+            remindedThisSession = true;
             const summary = summarizeReport(readGraphReport() ?? "");
-            const text = summary
-                ? `[graphify] ${summary} — invoke /skill:graphify, then use /graphify query, path, or explain`
-                : `[graphify] graph ready — invoke /skill:graphify, then use /graphify query, path, or explain`;
+            const visibleText = summary ? `[graphify] ${summary}` : `[graphify] graph ready — use /graphify query`;
             pi.sendMessage(
-                { customType: "graphify:hint", content: [{ type: "text", text: text }], display: true },
+                { customType: "graphify:hint", content: [{ type: "text", text: visibleText }], display: true },
                 { deliverAs: "steer" },
             );
-            remindedThisSession = true;
-        }
-    });
-
-    pi.on("tool_result", (event: any): void => {
-        if (remindedThisSession) return;
-        if (!isSearchOrFind(event)) return;
-        if (!graphExists()) return;
-
-        remindedThisSession = true;
-        const summary = summarizeReport(readGraphReport() ?? "");
-        const visibleText = summary ? `[graphify] ${summary}` : `[graphify] graph ready — use /graphify query`;
-        pi.sendMessage(
-            { customType: "graphify:hint", content: [{ type: "text", text: visibleText }], display: true },
-            { deliverAs: "steer" },
-        );
-    });
+        });
+    }
 
     pi.registerCommand("graphify", {
         description:
