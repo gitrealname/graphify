@@ -101,7 +101,7 @@ Output exactly this schema:
 }
 
 // Returns null if completeSimple is not available (non-corp OMP).
-async function anthropicProxyServer(pi: any, ctx: any, deepMode: boolean): Promise<{ port: number; stop: () => number } | null> {
+async function anthropicProxyServer(pi: any, ctx: any, deepMode: boolean, onFirstChunk?: () => void): Promise<{ port: number; stop: () => number; getCount: () => { total: number; active: number } } | null> {
     // Access SDK via the injected pi-coding-agent module — no direct imports.
     const piModule = pi.pi;
     const { settings } = piModule;
@@ -129,6 +129,7 @@ async function anthropicProxyServer(pi: any, ctx: any, deepMode: boolean): Promi
 
     let activeCount = 0;
     let chunkCount = 0;
+    let firstChunkFired = false;
     const queue: Array<() => void> = [];
 
     function acquireSlot(): Promise<void> {
@@ -179,6 +180,7 @@ async function anthropicProxyServer(pi: any, ctx: any, deepMode: boolean): Promi
 
                 await acquireSlot();
                 const n = ++chunkCount;
+                if (n === 1 && !firstChunkFired) { firstChunkFired = true; onFirstChunk?.(); }
                 logger.debug(`[DBG proxy] chunk ${n} active=${activeCount} systemLen=${system.length} msgLen=${userText.length}`);
 
                 let text = "";
@@ -214,6 +216,7 @@ async function anthropicProxyServer(pi: any, ctx: any, deepMode: boolean): Promi
     return {
         port: server.port,
         stop: () => { server.stop(true); return chunkCount; },
+        getCount: () => ({ total: chunkCount, active: activeCount }),
     };
 }
 
@@ -369,7 +372,11 @@ async function labelCommunities(pi: any, ctx: any, targetPath: string): Promise<
     const labelsPath = join(process.cwd(), graphifyOut(), ".graphify_labels.json");
     let existingLabels: Record<string, string> = {};
     try {
-        existingLabels = JSON.parse(require("node:fs").readFileSync(labelsPath, "utf-8"));
+        const raw: Record<string, string> = JSON.parse(require("node:fs").readFileSync(labelsPath, "utf-8"));
+        // exclude placeholder labels written by cluster-only (e.g. "Community 0")
+        for (const [k, v] of Object.entries(raw)) {
+            if (!/^Community \d+$/i.test(v)) existingLabels[k] = v;
+        }
     } catch { /* no existing labels — label everything */ }
 
     const allLines = samples.split("\n");
@@ -377,9 +384,8 @@ async function labelCommunities(pi: any, ctx: any, targetPath: string): Promise<
     logger.debug(`[DBG graphify] labelCommunities: ${allLines.length} total, ${toLabel.length} need labeling (${allLines.length - toLabel.length} already labeled)`);
 
     if (toLabel.length === 0) {
-        logger.debug("[DBG graphify] labelCommunities: all communities already labeled — skipping LLM calls");
-        return;
-    }
+        logger.debug("[DBG graphify] labelCommunities: all communities already labeled — running cluster-only to embed labels");
+    } else {
 
     // Batch communities — 80 per call to stay within output token budget.
     const BATCH = 80;
@@ -417,11 +423,50 @@ async function labelCommunities(pi: any, ctx: any, targetPath: string): Promise<
 
     require("node:fs").writeFileSync(labelsPath, JSON.stringify(allLabels), "utf-8");
     logger.debug(`[DBG graphify] labelCommunities: saved ${Object.keys(allLabels).length} labels (${toLabel.length} new)`);
+    } // end else (new labels needed)
 
     // Re-run cluster-only so GRAPH_REPORT.md picks up the labels
     const clusterProc2 = Bun.spawnSync([detectPython(), "-m", "graphify", "cluster-only", targetPath], { cwd: process.cwd() });
     const clusterStderr2 = new TextDecoder("utf-8").decode(clusterProc2.stderr).trim();
     logger.debug(`[DBG graphify] labelCommunities: cluster-only re-run exit=${clusterProc2.exitCode}${clusterStderr2 ? " stderr=" + clusterStderr2.slice(0, 150) : ""}`);
+}
+
+// ── background extraction state ──────────────────────────────────────────────
+
+interface ExtractionState {
+    proc: ReturnType<typeof Bun.spawn>;
+    pid: number;
+    stage: "ast" | "semantic" | "clustering" | "labeling" | "done" | "failed";
+    target: string;
+    startedAt: number;
+    proxy: { port: number; stop: () => number; getCount: () => { total: number; active: number } } | null;
+}
+
+let _running: ExtractionState | null = null;
+
+function _elapsed(startedAt: number): string {
+    const s = Math.round((Date.now() - startedAt) / 1000);
+    const m = Math.floor(s / 60);
+    return m > 0 ? `${m}m${s % 60}s` : `${s}s`;
+}
+
+function _fmtHint(title: string, body?: string): string {
+    return body ? `### ${title}\n${body}` : `### ${title}`;
+}
+
+function _progressHint(): string {
+    if (!_running) return "";
+    const cnt = _running.proxy?.getCount() ?? { total: 0, active: 0 };
+    const active = cnt.active > 0 ? ` (${cnt.active} active)` : "";
+    const stageLabel: Record<ExtractionState["stage"], string> = {
+        ast: "indexing (AST)", semantic: "extracting", clustering: "clustering",
+        labeling: "labeling", done: "done", failed: "failed",
+    };
+    // derive actual stage: if proxy exists but no chunks yet, still in AST phase
+    const displayStage = (_running.stage === "semantic" && cnt.total === 0) ? "ast" : _running.stage;
+    const title = `⚙ graphify — ${stageLabel[displayStage]} (PID: ${_running.pid})`;
+    const body = `chunks \`${cnt.total}\`${active} · elapsed \`${_elapsed(_running.startedAt)}\` · target \`${_running.target}\``;
+    return _fmtHint(title, body);
 }
 
 // ── extension factory ─────────────────────────────────────────────────────────
@@ -435,11 +480,11 @@ export default function (pi: any): void {
             remindedThisSession = false;
             if (graphExists()) {
                 const summary = summarizeReport(readGraphReport() ?? "");
-                const text = summary
-                    ? `[graphify] ${summary} — invoke /skill:graphify, then use /graphify query, path, or explain`
-                    : `[graphify] graph ready — invoke /skill:graphify, then use /graphify query, path, or explain`;
+                const body = summary
+                    ? `${summary}\ninvoke \`/skill:graphify\`, then use \`/graphify query\`, \`path\`, or \`explain\``
+                    : `invoke \`/skill:graphify\`, then use \`/graphify query\`, \`path\`, or \`explain\``;
                 pi.sendMessage(
-                    { customType: "graphify:hint", content: [{ type: "text", text: text }], display: true },
+                    { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("🔍 graphify — graph ready", body) }], display: true },
                     { deliverAs: "steer" },
                 );
                 remindedThisSession = true;
@@ -453,13 +498,30 @@ export default function (pi: any): void {
 
             remindedThisSession = true;
             const summary = summarizeReport(readGraphReport() ?? "");
-            const visibleText = summary ? `[graphify] ${summary}` : `[graphify] graph ready — use /graphify query`;
+            const body = summary ?? "use `/graphify query`, `path`, or `explain`";
             pi.sendMessage(
-                { customType: "graphify:hint", content: [{ type: "text", text: visibleText }], display: true },
+                { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("🔍 graphify — graph ready", body) }], display: true },
                 { deliverAs: "steer" },
             );
         });
     }
+
+    // Report background extraction progress after each agent turn
+    pi.on("agent_end", (): void => {
+        if (!_running) return;
+        pi.sendMessage(
+            { customType: "graphify:hint", content: [{ type: "text", text: _progressHint() }], display: true },
+            { deliverAs: "nextTurn" },
+        );
+    });
+
+    // Kill background process on session shutdown
+    pi.on("session_shutdown", (): void => {
+        if (!_running) return;
+        _running.proc.kill();
+        _running.proxy?.stop();
+        _running = null;
+    });
 
     pi.registerCommand("graphify", {
         description:
@@ -481,6 +543,7 @@ export default function (pi: any): void {
                 "clone", "merge-graphs", "prs",
                 // Utility
                 "check-update", "tree",
+                "kill",
                 "--help", "--version",
             ];
             return TOP.filter((s) => s.startsWith(prefix)).map((s) => ({ label: s, value: s }));
@@ -512,6 +575,191 @@ export default function (pi: any): void {
             const hasBackend = argv.some((a: string) => a === "--backend" || a.startsWith("--backend="));
 
             logger.debug(`[DBG ext-cmd-graphify] argv=${JSON.stringify(argv)} hasBackend=${hasBackend} hasModel=${!!ctx.model}`);
+            // ── /graphify (no args) → status hint if running ─────────────────
+            if (argv.length === 0 && _running) {
+                pi.sendMessage(
+                    { customType: "graphify:hint", content: [{ type: "text", text: _progressHint() }], display: true },
+                    { deliverAs: "nextTurn" },
+                );
+                return;
+            }
+
+            // ── /graphify kill ────────────────────────────────────────────────
+            if (argv[0] === "kill") {
+                if (!_running) {
+                pi.sendMessage(
+                    { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("graphify", "no extraction running") }], display: true },
+                    { deliverAs: "nextTurn" },
+                );
+                    return;
+                }
+                const pid = _running.pid;
+                _running.proc.kill();
+                _running.proxy?.stop();
+                _running = null;
+                logger.debug(`[DBG graphify] killed background process pid=${pid}`);
+                pi.sendMessage(
+                    { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint(`🛑 graphify — stopped (PID: ${pid})`) }], display: true },
+                    { deliverAs: "nextTurn" },
+                );
+                return;
+            }
+
+            // ── no-op guard for background-blocked commands ───────────────────
+            const BG_BLOCKED = ["extract", "add", "cluster-only"];
+            if (_running && BG_BLOCKED.includes(argv[0])) {
+                pi.sendMessage(
+                    { customType: "graphify:hint", content: [{ type: "text", text: `${_progressHint()}\nuse \`/graphify kill\` to stop` }], display: true },
+                    { deliverAs: "nextTurn" },
+                );
+                return;
+            }
+
+            // ── background extract helper ─────────────────────────────────────
+            const startBackgroundExtract = async (target: string): Promise<void> => {
+                const capturedModel = ctx.model;
+                const capturedSmolModel = ctx.smolModel;
+
+                let proxy: ExtractionState["proxy"] = null;
+                if (ctx.model) {
+                    try {
+                        proxy = await anthropicProxyServer(pi, ctx, false, () => {
+                            if (!_running) return;
+                            _running.stage = "semantic";
+                            pi.sendMessage(
+                                { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint(`⚙ graphify — extracting (PID: ${_running.pid})`, `elapsed \`${_elapsed(_running.startedAt)}\` · target \`${target}\``) }], display: true },
+                                { deliverAs: "nextTurn" },
+                            );
+                        });
+                        if (proxy) logger.debug(`[DBG graphify bg] proxy active port=${proxy.port}`);
+                    } catch (err) {
+                        logger.debug(`[DBG graphify bg] proxy start failed: ${err}`);
+                        pi.sendMessage(
+                            { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("⚠ graphify — proxy failed", `semantic extraction unavailable · running AST-only\n\`${err}\``) }], display: true },
+                            { deliverAs: "nextTurn" },
+                        );
+                    }
+                }
+
+                const env = { ...process.env, PYTHONUTF8: "1" } as Record<string, string>;
+                delete env.GEMINI_API_KEY;
+                if (proxy) { env.ANTHROPIC_BASE_URL = `http://localhost:${proxy.port}`; env.ANTHROPIC_API_KEY = "omp-internal"; }
+                const spawnArgv = proxy ? ["extract", target, "--token-budget", "20000"] : ["extract", target];
+                logger.debug(`[DBG graphify bg] spawning argv=${JSON.stringify(spawnArgv)}`);
+
+                let proc: ReturnType<typeof Bun.spawn>;
+                try {
+                    proc = Bun.spawn([detectPython(), "-m", "graphify", ...spawnArgv], {
+                        cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe",
+                    });
+                } catch (err) {
+                    proxy?.stop();
+                    _running = null;
+                    pi.sendMessage(
+                        { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("❌ graphify — spawn failed", `\`${err}\``) }], display: true },
+                        { deliverAs: "nextTurn" },
+                    );
+                    return;
+                }
+
+                _running = { proc, pid: proc.pid, stage: "ast", target, startedAt: Date.now(), proxy };
+                logger.debug(`[DBG graphify bg] started pid=${proc.pid}`);
+                pi.sendMessage(
+                    { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint(`⚙ graphify — indexing AST (PID: ${proc.pid})`, `target \`${target}\``) }], display: true },
+                    { deliverAs: "nextTurn" },
+                );
+
+                proc.exited.then(async (exitCode: number) => {
+                    if (_running?.proc !== proc) return;
+                    const chunksDone = proxy?.stop() ?? 0;
+                    logger.debug(`[DBG graphify bg] exit=${exitCode} chunks=${chunksDone}`);
+
+                    if (exitCode === 0) {
+                        try {
+                            _running.stage = "clustering";
+                            pi.sendMessage(
+                                { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint(`⚙ graphify — clustering (PID: ${_running.pid})`, `elapsed \`${_elapsed(_running.startedAt)}\` · target \`${target}\``) }], display: true },
+                                { deliverAs: "nextTurn" },
+                            );
+                            const clusterProc = Bun.spawnSync([detectPython(), "-m", "graphify", "cluster-only", target], { cwd: process.cwd() });
+                            if (clusterProc.exitCode !== 0) throw new Error(`cluster-only exit=${clusterProc.exitCode}`);
+                            logger.debug(`[DBG graphify bg] cluster-only done`);
+
+                            _running.stage = "labeling";
+                            pi.sendMessage(
+                                { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint(`⚙ graphify — labeling (PID: ${_running.pid})`, `elapsed \`${_elapsed(_running.startedAt)}\` · target \`${target}\``) }], display: true },
+                                { deliverAs: "nextTurn" },
+                            );
+                            await labelCommunities(pi, { model: capturedModel, smolModel: capturedSmolModel }, target);
+                            _running.stage = "done";
+                        } catch (err) {
+                            logger.debug(`[DBG graphify bg] post-process error: ${err}`);
+                            _running.stage = "failed";
+                            const elapsed = _elapsed(_running.startedAt);
+                            _running = null;
+                            pi.sendMessage(
+                                { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("❌ graphify — post-process failed", `\`${err}\` · elapsed \`${elapsed}\``) }], display: true },
+                                { deliverAs: "nextTurn" },
+                            );
+                            return;
+                        }
+                    } else {
+                        _running.stage = "failed";
+                    }
+
+                    const elapsed = _elapsed(_running.startedAt);
+                    if (_running.stage === "done") {
+                        const summary = summarizeReport(readGraphReport() ?? "");
+                        _running = null;
+                        pi.sendMessage(
+                            { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("✅ graphify — done", `${summary ?? "graph updated"} · chunks \`${chunksDone}\` · elapsed \`${elapsed}\``) }], display: true },
+                            { deliverAs: "nextTurn" },
+                        );
+                    } else {
+                        _running = null;
+                        pi.sendMessage(
+                            { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("❌ graphify — failed", `exit \`${exitCode}\` · elapsed \`${elapsed}\``) }], display: true },
+                            { deliverAs: "nextTurn" },
+                        );
+                    }
+                }).catch((err: unknown) => {
+                    logger.debug(`[DBG graphify bg] unhandled exit error: ${err}`);
+                    proxy?.stop();
+                    _running = null;
+                    pi.sendMessage(
+                        { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("❌ graphify — process error", `\`${err}\``) }], display: true },
+                        { deliverAs: "nextTurn" },
+                    );
+                });
+            };
+
+            // ── extract: fire background ──────────────────────────────────────
+            if (argv[0] === "extract" && !hasBackend) {
+                await startBackgroundExtract(argv[1] ?? ".");
+                return;
+            }
+
+            // ── add: fetch synchronously, then fire background extract ─────────
+            if (argv[0] === "add" && !hasBackend) {
+                const target = argv[1] ?? ".";
+                let addOut = "";
+                try {
+                    ({ output: addOut } = await runGraphify(pi, argv, ctx, hasBackend, ctx.signal));
+                } catch (err) {
+                    addOut = String(err);
+                }
+                if (addOut.startsWith("error")) {
+                    pi.sendMessage(
+                        { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("❌ graphify — add failed", `\`${addOut}\``) }], display: true },
+                        { deliverAs: "nextTurn" },
+                    );
+                    return;
+                }
+                await startBackgroundExtract(target);
+                return;
+            }
+
+
 
             let out = "";
             let chunkCount = 0;
@@ -545,8 +793,8 @@ export default function (pi: any): void {
                 if (summary) {
                     const chunks = ` · ${chunkCount} chunk${chunkCount !== 1 ? "s" : ""} extracted`;
                     pi.sendMessage(
-                        { customType: "graphify:hint", content: [{ type: "text", text: `[graphify] ${summary}${chunks}` }], display: true },
-                        { deliverAs: "steer" },
+                        { customType: "graphify:hint", content: [{ type: "text", text: _fmtHint("✅ graphify — done", `${summary} · chunks \`${chunkCount}\``) }], display: true },
+                        { deliverAs: "nextTurn" },
                     );
                 }
             } else if (out.trim()) {
